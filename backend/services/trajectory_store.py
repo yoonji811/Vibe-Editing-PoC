@@ -12,6 +12,8 @@ from models.schemas import Trajectory, TrajectoryEvent
 load_dotenv()
 
 _DATABASE_URL = os.getenv("DATABASE_URL")
+if _DATABASE_URL and _DATABASE_URL.startswith("postgres://"):
+    _DATABASE_URL = _DATABASE_URL.replace("postgres://", "postgresql://", 1)
 _TRAJECTORY_DIR = Path(os.getenv("TRAJECTORY_DIR", "./data/trajectories"))
 
 # ---------------------------------------------------------------------------
