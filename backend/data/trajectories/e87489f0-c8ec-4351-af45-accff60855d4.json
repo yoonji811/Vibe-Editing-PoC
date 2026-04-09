@@ -1,0 +1,92 @@
+{
+  "session_id": "e87489f0-c8ec-4351-af45-accff60855d4",
+  "created_at": "2026-04-09T11:20:14.776637",
+  "updated_at": "2026-04-09T11:20:52.261835",
+  "original_image": {
+    "filename": "MEITU_20240708_205602295.jpg",
+    "size_bytes": 2799745,
+    "width": 2098,
+    "height": 2796,
+    "mime_type": "image/jpeg"
+  },
+  "events": [
+    {
+      "event_id": "dbc609b6-1c1a-4a67-bc89-ab3a5e9247e1",
+      "timestamp": "2026-04-09T11:20:14.776744",
+      "type": "image_upload",
+      "payload": {
+        "user_text": null,
+        "intent_classified": null,
+        "engine_used": null,
+        "model_used": null,
+        "params": null,
+        "result_image_hash": null,
+        "latency_ms": null,
+        "error": null,
+        "filename": "MEITU_20240708_205602295.jpg",
+        "size_bytes": 2799745,
+        "width": 2098,
+        "height": 2796
+      }
+    },
+    {
+      "event_id": "1e64b9f3-6307-48a4-9875-cc21099a27ab",
+      "timestamp": "2026-04-09T11:20:26.499118",
+      "type": "chat_input",
+      "payload": {
+        "user_text": "차렷 자세로 바꿔줘",
+        "intent_classified": null,
+        "engine_used": null,
+        "model_used": null,
+        "params": null,
+        "result_image_hash": null,
+        "latency_ms": null,
+        "error": null,
+        "filename": null,
+        "size_bytes": null,
+        "width": null,
+        "height": null
+      }
+    },
+    {
+      "event_id": "28b00cd0-c6df-4099-afd1-45f77b38aabf",
+      "timestamp": "2026-04-09T11:20:37.727199",
+      "type": "edit_applied",
+      "payload": {
+        "user_text": "차렷 자세로 바꿔줘",
+        "intent_classified": "gemini_generative",
+        "engine_used": "gemini",
+        "model_used": null,
+        "params": {
+          "style": "차렷 자세"
+        },
+        "result_image_hash": "012437850bb560ce",
+        "latency_ms": 11141,
+        "error": null,
+        "filename": null,
+        "size_bytes": null,
+        "width": null,
+        "height": null
+      }
+    },
+    {
+      "event_id": "fb40f530-a5f0-4b8d-be40-850c88001d61",
+      "timestamp": "2026-04-09T11:20:52.261820",
+      "type": "image_saved",
+      "payload": {
+        "user_text": null,
+        "intent_classified": null,
+        "engine_used": null,
+        "model_used": null,
+        "params": null,
+        "result_image_hash": null,
+        "latency_ms": null,
+        "error": null,
+        "filename": "e87489f0-c8ec-4351-af45-accff60855d4_saved.jpg",
+        "size_bytes": null,
+        "width": null,
+        "height": null
+      }
+    }
+  ]
+}

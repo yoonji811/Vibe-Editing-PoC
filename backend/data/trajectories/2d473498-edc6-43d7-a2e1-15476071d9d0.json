@@ -1,0 +1,111 @@
+{
+  "session_id": "2d473498-edc6-43d7-a2e1-15476071d9d0",
+  "created_at": "2026-04-09T11:25:57.194597",
+  "updated_at": "2026-04-09T11:26:36.159493",
+  "original_image": {
+    "filename": "MEITU_20240708_205602295.jpg",
+    "size_bytes": 2799745,
+    "width": 2098,
+    "height": 2796,
+    "mime_type": "image/jpeg"
+  },
+  "events": [
+    {
+      "event_id": "d1bdd2ad-9700-48d7-83a4-0027aaa8e9f2",
+      "timestamp": "2026-04-09T11:25:57.194681",
+      "type": "image_upload",
+      "payload": {
+        "user_text": null,
+        "intent_classified": null,
+        "engine_used": null,
+        "model_used": null,
+        "params": null,
+        "result_image_hash": null,
+        "latency_ms": null,
+        "error": null,
+        "filename": "MEITU_20240708_205602295.jpg",
+        "size_bytes": 2799745,
+        "width": 2098,
+        "height": 2796
+      }
+    },
+    {
+      "event_id": "584d4bee-73bc-44cb-8829-0fab4c494097",
+      "timestamp": "2026-04-09T11:26:08.578170",
+      "type": "chat_input",
+      "payload": {
+        "user_text": "이미지 밝게 만들어줘",
+        "intent_classified": null,
+        "engine_used": null,
+        "model_used": null,
+        "params": null,
+        "result_image_hash": null,
+        "latency_ms": null,
+        "error": null,
+        "filename": null,
+        "size_bytes": null,
+        "width": null,
+        "height": null
+      }
+    },
+    {
+      "event_id": "c4baa90c-58ba-411e-a718-9b8f15d7e8bc",
+      "timestamp": "2026-04-09T11:26:20.072027",
+      "type": "edit_applied",
+      "payload": {
+        "user_text": "이미지 밝게 만들어줘",
+        "intent_classified": "opencv",
+        "engine_used": "opencv",
+        "model_used": null,
+        "params": {
+          "beta": 60
+        },
+        "result_image_hash": "9127d92be1183a17",
+        "latency_ms": 11405,
+        "error": null,
+        "filename": null,
+        "size_bytes": null,
+        "width": null,
+        "height": null
+      }
+    },
+    {
+      "event_id": "b92f28e0-a929-46bc-a1ec-c3a4399443e2",
+      "timestamp": "2026-04-09T11:26:32.814217",
+      "type": "chat_input",
+      "payload": {
+        "user_text": "다시 원래대로 돌려줘",
+        "intent_classified": null,
+        "engine_used": null,
+        "model_used": null,
+        "params": null,
+        "result_image_hash": null,
+        "latency_ms": null,
+        "error": null,
+        "filename": null,
+        "size_bytes": null,
+        "width": null,
+        "height": null
+      }
+    },
+    {
+      "event_id": "1d10d9a2-0bc6-4c44-978b-bface14098bf",
+      "timestamp": "2026-04-09T11:26:36.159481",
+      "type": "edit_applied",
+      "payload": {
+        "user_text": "다시 원래대로 돌려줘",
+        "intent_classified": "session_action",
+        "engine_used": null,
+        "model_used": null,
+        "params": {},
+        "result_image_hash": "d8b5fd7619e781f6",
+        "latency_ms": 3260,
+        "error": null,
+        "filename": null,
+        "size_bytes": null,
+        "width": null,
+        "height": null
+      }
+    }
+  ]
+}
