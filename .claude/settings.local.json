@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm create:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tailwindcss:*)",
+      "Bash(npm run:*)",
+      "Bash(python -c ':*)",
+      "Bash(curl:*)",
+      "Bash(python:*)",
+      "Bash(pkill -f \"uvicorn main:app\")",
+      "Bash(find \"/c/Users/yj811/OneDrive - 개인/OneDrive/workspace2409_samsung/260401_VibeEditing/Vibe Editing PoC/backend\" -name \"*.pyc\" -delete)",
+      "Bash(netstat -ano)",
+      "Bash(taskkill /PID 33288 /F)",
+      "Bash(taskkill /PID 9152 /F)",
+      "Bash(taskkill /PID 29932 /F)",
+      "Bash(taskkill /PID 33288 /T /F)",
+      "Bash(taskkill /PID 9152 /T /F)",
+      "Bash(taskkill /PID 29932 /T /F)",
+      "Bash(cmd /c \"taskkill /F /PID 33288 & taskkill /F /PID 9152 & taskkill /F /PID 29932\")",
+      "Bash(cmd /c \"tasklist /FI \\\\\"PID eq 29932\\\\\" /FO LIST\")",
+      "Bash(cmd /c \"tasklist /FI \\\\\"PID eq 9152\\\\\" /FO LIST\")",
+      "Bash(cmd /c \"wmic process where \\\\\"commandline like '%uvicorn%'\\\\\" get processid,commandline\")",
+      "Bash(grep -v \"^$\")",
+      "Bash(powershell:*)",
+      "Bash(railway --version)",
+      "Bash(vercel --version)",
+      "Bash(git -C \"/c/Users/yj811/OneDrive - 개인/OneDrive/workspace2409_samsung/260401_VibeEditing/Vibe Editing PoC\" status)"
+    ]
+  }
+}
