@@ -21,21 +21,33 @@ _TRAJECTORY_DIR = Path(os.getenv("TRAJECTORY_DIR", "./data/trajectories"))
 # ---------------------------------------------------------------------------
 
 def _get_conn():
-    import psycopg2
-    return psycopg2.connect(_DATABASE_URL)
+    import pg8000
+    import urllib.parse
+    p = urllib.parse.urlparse(_DATABASE_URL)
+    return pg8000.connect(
+        host=p.hostname,
+        port=p.port or 5432,
+        database=p.path.lstrip("/"),
+        user=p.username,
+        password=p.password,
+        ssl_context=True,
+    )
 
 
 def _ensure_table() -> None:
-    with _get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS trajectories (
-                    session_id TEXT PRIMARY KEY,
-                    data       JSONB        NOT NULL,
-                    updated_at TIMESTAMP    NOT NULL DEFAULT NOW()
-                )
-            """)
+    conn = _get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS trajectories (
+                session_id TEXT PRIMARY KEY,
+                data       TEXT         NOT NULL,
+                updated_at TIMESTAMP    NOT NULL DEFAULT NOW()
+            )
+        """)
         conn.commit()
+    finally:
+        conn.close()
 
 
 _table_ready = False
@@ -52,27 +64,33 @@ def _pg_save(trajectory: Trajectory) -> None:
     _init_once()
     trajectory.updated_at = datetime.utcnow()
     payload = json.dumps(trajectory.model_dump(mode="json"), default=str)
-    with _get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO trajectories (session_id, data, updated_at)
-                VALUES (%s, %s::jsonb, NOW())
-                ON CONFLICT (session_id) DO UPDATE
-                    SET data = EXCLUDED.data,
-                        updated_at = NOW()
-            """, (trajectory.session_id, payload))
+    conn = _get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO trajectories (session_id, data, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (session_id) DO UPDATE
+                SET data = EXCLUDED.data,
+                    updated_at = NOW()
+        """, (trajectory.session_id, payload))
         conn.commit()
+    finally:
+        conn.close()
 
 
 def _pg_load(session_id: str) -> Optional[Trajectory]:
     _init_once()
-    with _get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT data FROM trajectories WHERE session_id = %s", (session_id,))
-            row = cur.fetchone()
+    conn = _get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT data FROM trajectories WHERE session_id = %s", (session_id,))
+        row = cur.fetchone()
+    finally:
+        conn.close()
     if row is None:
         return None
-    return Trajectory(**row[0])
+    return Trajectory(**json.loads(row[0]))
 
 
 # ---------------------------------------------------------------------------
