@@ -9,7 +9,7 @@ interface Props {
   error: string | null
 }
 
-export default function ChatPanel({ isLoading, onSend, onSave, error }: Props) {
+export default function ChatPanel({ isLoading, onSend, error }: Props) {
   const [input, setInput] = useState('')
 
   const submit = () => {

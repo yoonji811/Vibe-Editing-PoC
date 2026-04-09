@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"cd \\\"/c/Users/yj811/OneDrive - 개인/OneDrive/workspace2409_samsung/260401_VibeEditing/Vibe Editing PoC/backend\\\" && source venv/Scripts/activate && python -c \\\"import google.generativeai as ...",
-  "error": "Exit code 1\nTraceback (most recent call last):\r\n  File \"<string>\", line 1, in <module>\r\nModuleNotFoundError: No module named 'google'\n[rerun: b11]",
-  "timestamp": "2026-04-09T09:06:51.124Z",
-  "retry_count": 1
-}

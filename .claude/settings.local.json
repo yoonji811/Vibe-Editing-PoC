@@ -25,7 +25,16 @@
       "Bash(powershell:*)",
       "Bash(railway --version)",
       "Bash(vercel --version)",
-      "Bash(git -C \"/c/Users/yj811/OneDrive - 개인/OneDrive/workspace2409_samsung/260401_VibeEditing/Vibe Editing PoC\" status)"
+      "Bash(git -C \"/c/Users/yj811/OneDrive - 개인/OneDrive/workspace2409_samsung/260401_VibeEditing/Vibe Editing PoC\" status)",
+      "Bash(npm bin:*)",
+      "Bash(ls \"$\\(npm bin -g\\)/railway\")",
+      "Bash(ls \"$\\(npm bin -g\\)/vercel\")",
+      "Bash(npm prefix:*)",
+      "Bash(\"/c/Users/yj811/AppData/Roaming/npm/railway\" --version)",
+      "Bash(\"/c/Users/yj811/AppData/Roaming/npm/vercel\" --version)",
+      "Bash(\"/c/Users/yj811/AppData/Roaming/npm/railway.cmd\" --version)",
+      "Bash(\"/c/Users/yj811/AppData/Roaming/npm/vercel.cmd\" --version)",
+      "Bash(/c/Users/yj811/AppData/Roaming/npm/railway.cmd variables:*)"
     ]
   }
 }
