@@ -73,12 +73,40 @@ image-editor/
 - 세션 내 편집 히스토리(텍스트1 → 텍스트2 → ...)를 컨텍스트로 유지
 
 ### 2. 채팅 기반 편집 흐름
+
+모든 편집 요청은 4-에이전트 파이프라인을 통해 처리됩니다 (`routers/edit.py` → `agents/`).
+
 ```
-사용자 입력 → intent_router (Gemini) → 의도 분류
-                                        ├─ "brightness", "crop", "blur" 등 → opencv_editor
-                                        ├─ "remove object", "add element", "style transfer" → gemini_editor
-                                        └─ "undo", "save", "history" → 세션 액션
+사용자 입력
+  ├─ undo / reset 키워드 → 세션 액션 (즉시 처리, 파이프라인 우회)
+  └─ 일반 편집 요청 → OrchestratorAgent.process_edit()
+                          │
+                          ├─ 1. PlannerAgent.generate_plan()
+                          │      └─ Gemini로 사용자 요청 → Plan JSON 변환
+                          │         (available_tools, image_meta, ancestor_chain 컨텍스트 포함)
+                          │
+                          ├─ 2. ValidatorAgent.validate()  (use_validator=True 기본값)
+                          │      ├─ Layer 1: 정적 검사 (툴 존재, 파라미터 스키마, DAG 사이클)
+                          │      └─ Layer 2: LLM 의미 검증
+                          │           - INTENT: plan.intent가 사용자 의도를 정확히 표현하는가?
+                          │           - COVERAGE: 모든 요구사항이 step으로 커버되는가?
+                          │           - REDUNDANCY: 불필요한 step이 있는가?
+                          │           - CONSISTENCY: 이전 편집 상태와 모순되는가?
+                          │           - QUALITY: 파라미터 값이 시각적으로 충분한가?
+                          │             (분위기/스타일 요청은 단일 툴 부족 → 여러 툴 조합 요구)
+                          │      → 거부 시 Planner에 피드백 전달 (최대 3회 재시도, leniency 증가)
+                          │
+                          └─ 3. Tool Registry 실행 (topological order)
+                                 └─ 각 step: tool.run() → step_log 기록
 ```
+
+**에이전트 파일 위치**: `backend/agents/`
+- `orchestrator.py` — 파이프라인 전체 관리, 편집 트리 유지
+- `planner.py` — Plan JSON 생성
+- `validator.py` — 2-layer 검증 (정적 + LLM 의미/품질)
+- `tool_registry.py` — 툴 등록/조회
+- `tools/opencv_tools.py` — 빌트인 OpenCV 툴들
+- `tool_generator.py` — 세션 로그 분석 → 새 툴 자동 생성 (오프라인)
 
 ### 3. Trajectory 스키마 (`trajectories/{session_id}.json`)
 ```json
@@ -99,14 +127,56 @@ image-editor/
       "timestamp": "ISO8601",
       "type": "image_upload | chat_input | edit_applied | image_saved | undo | session_end",
       "payload": {
-        "user_text": "배경을 흐리게 해줘",
-        "intent_classified": "blur_background",
-        "engine_used": "opencv",
-        "model_used": null,
-        "params": {"ksize": 21},
+        "user_text": "따뜻한 분위기로 만들어줘",
+        "intent_classified": "Adjust the image to a warm cozy tone.",
+        "engine_used": "agent",
+        "params": {"shift": 20},
         "result_image_hash": "sha256...",
-        "latency_ms": 340,
-        "error": null
+        "latency_ms": 14273,
+        "error": null,
+
+        "plan": {
+          "plan_id": "uuid",
+          "intent": "Adjust the image to a warm cozy tone.",
+          "confidence": 0.9,
+          "steps": [
+            {
+              "step_id": "s1",
+              "tool_name": "hue_shift",
+              "params": {"shift": 20},
+              "rationale": "shift hue toward warm red/orange",
+              "depends_on": []
+            }
+          ],
+          "unmet_requirements": []
+        },
+
+        "validator_verdict": {
+          "approved": true,
+          "quality_score": 0.75,
+          "reasons": [
+            {
+              "category": "quality",
+              "severity": "warning",
+              "message": "Single hue_shift may be subtle; consider combining with saturation/brightness.",
+              "step_id": "s1"
+            }
+          ],
+          "feedback_for_planner": ""
+        },
+        "validator_attempts": 1,
+
+        "orchestrator_step_logs": [
+          {
+            "step_id": "s1",
+            "tool_name": "hue_shift",
+            "params": {"shift": 20},
+            "rationale": "shift hue toward warm red/orange",
+            "status": "success",
+            "error": null,
+            "latency_ms": 12
+          }
+        ]
       }
     }
   ]

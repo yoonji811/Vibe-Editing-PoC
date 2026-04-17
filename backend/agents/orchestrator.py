@@ -27,6 +27,7 @@ import cv2
 import numpy as np
 
 from .planner import PlannerAgent
+from .quality_checker import QualityCheckerAgent
 from .tool_registry import registry as _registry
 from .validator import ValidatorAgent
 
@@ -174,35 +175,52 @@ def _topological_sort(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _execute_plan(
     plan: Dict[str, Any], base_image: np.ndarray
-) -> Tuple[np.ndarray, List[str]]:
+) -> Tuple[np.ndarray, List[str], List[Dict[str, Any]]]:
     """Execute all plan steps.
 
     Returns:
-        (final_image, list_of_execution_errors)
+        (final_image, list_of_execution_errors, step_logs)
     """
     current_image = base_image.copy()
     produced_artifacts: Dict[str, Any] = {}
     errors: List[str] = []
+    step_logs: List[Dict[str, Any]] = []
 
     try:
         steps = _topological_sort(plan.get("steps", []))
     except Exception as exc:
         errors.append(f"Topological sort failed: {exc}")
-        return current_image, errors
+        return current_image, errors, step_logs
 
     for step in steps:
         tool_name = step.get("tool_name", "")
         params = dict(step.get("params", {}))
         produces_key = step.get("produces")
+        step_id = step.get("step_id", "?")
+        t_step = time.time()
 
         # Substitute artifact references in params
         for pk, pv in list(params.items()):
             if isinstance(pv, str) and pv in produced_artifacts:
                 params[pk] = produced_artifacts[pv]
 
+        log: Dict[str, Any] = {
+            "step_id": step_id,
+            "tool_name": tool_name,
+            "params": params,
+            "rationale": step.get("rationale", ""),
+            "status": "pending",
+            "error": None,
+            "latency_ms": 0,
+        }
+
         try:
             tool = _registry.get(tool_name)
         except KeyError as exc:
+            log["status"] = "error"
+            log["error"] = str(exc)
+            log["latency_ms"] = int((time.time() - t_step) * 1000)
+            step_logs.append(log)
             errors.append(str(exc))
             continue
 
@@ -213,19 +231,23 @@ def _execute_plan(
                 current_image = result_img
                 if produces_key is not None and produced is not None:
                     produced_artifacts[produces_key] = produced
+                log["status"] = "success"
                 break
             except Exception as exc:
                 if attempt == 0:
                     logger.warning(
                         "Step %s (%s) failed, retrying: %s",
-                        step["step_id"], tool_name, exc,
+                        step_id, tool_name, exc,
                     )
                 else:
-                    errors.append(
-                        f"Step {step['step_id']} ({tool_name}) failed: {exc}"
-                    )
+                    log["status"] = "error"
+                    log["error"] = str(exc)
+                    errors.append(f"Step {step_id} ({tool_name}) failed: {exc}")
 
-    return current_image, errors
+        log["latency_ms"] = int((time.time() - t_step) * 1000)
+        step_logs.append(log)
+
+    return current_image, errors, step_logs
 
 
 # ---------------------------------------------------------------------------
@@ -236,10 +258,12 @@ class OrchestratorAgent:
     """Stateless orchestrator.  All state lives in module-level dicts."""
 
     MAX_VALIDATOR_ATTEMPTS = 3
+    MAX_QUALITY_ATTEMPTS = 2
 
     def __init__(self) -> None:
         self._planner = PlannerAgent()
         self._validator = ValidatorAgent()
+        self._quality_checker = QualityCheckerAgent()
 
     def process_edit(
         self,
@@ -312,74 +336,36 @@ class OrchestratorAgent:
         available_tools = _registry.list()
 
         # ------------------------------------------------------------------
-        # 3. Planner → [Validator] loop
+        # 3. Planner → Execute (Validator/QualityChecker disabled for speed)
         # ------------------------------------------------------------------
-        plan: Optional[Dict[str, Any]] = None
-        validator_verdict: Optional[Dict[str, Any]] = None
-        feedback: Optional[str] = None
-        plan_errors: List[str] = []
+        plan = self._planner.generate_plan(
+            prompt=prompt,
+            ancestor_chain=ancestor_context,
+            image_meta=image_meta,
+            available_tools=available_tools,
+            mode=mode,
+        )
 
-        for attempt in range(1, self.MAX_VALIDATOR_ATTEMPTS + 1):
-            plan = self._planner.generate_plan(
-                prompt=prompt,
-                ancestor_chain=ancestor_context,
-                image_meta=image_meta,
-                available_tools=available_tools,
-                feedback=feedback,
-                mode=mode,
-            )
-
-            if not use_validator:
-                break
-
-            validator_verdict = self._validator.validate(
-                plan=plan,
-                original_prompt=prompt,
-                ancestor_chain=ancestor_context,
-                available_tools=available_tools,
-                attempt_number=attempt,
-            )
-
-            if validator_verdict["approved"]:
-                break
-
-            feedback = validator_verdict.get("feedback_for_planner", "")
-            logger.info(
-                "Validator rejected plan (attempt %d/%d): %s",
-                attempt,
-                self.MAX_VALIDATOR_ATTEMPTS,
-                feedback[:120],
-            )
-
-            if attempt == self.MAX_VALIDATOR_ATTEMPTS:
-                plan_errors.append(
-                    "Validator rejected plan after maximum attempts. "
-                    "Please clarify your request."
-                )
-                plan = None
-
-        # ------------------------------------------------------------------
-        # 4. Execute plan
-        # ------------------------------------------------------------------
-        if plan is None or plan_errors:
+        if not plan or not plan.get("steps"):
             return {
                 "session_id": session_id,
                 "edit_id": None,
                 "parent_edit_id": parent_edit_id,
                 "result_image_b64": None,
                 "executed_plan": plan,
-                "explanation": (
-                    plan_errors[0]
-                    if plan_errors
-                    else "Plan could not be generated."
-                ),
-                "errors": plan_errors,
+                "validator_verdict": None,
+                "validator_attempts": 0,
+                "quality_verdict": None,
+                "step_logs": [],
+                "explanation": "Plan could not be generated.",
+                "errors": ["Planner returned empty plan."],
             }
 
-        result_image, exec_errors = _execute_plan(plan, base_image)
+        result_image, exec_errors, step_logs = _execute_plan(plan, base_image)
+        result_b64 = _cv2_to_b64(result_image)
 
         # ------------------------------------------------------------------
-        # 5. Record new edit node in tree
+        # 4. Record new edit node in tree
         # ------------------------------------------------------------------
         edit_id = str(uuid.uuid4())
         image_ref = _store_image(result_image)
@@ -390,7 +376,8 @@ class OrchestratorAgent:
             "session_id": session_id,
             "prompt": prompt,
             "plan": plan,
-            "validator_verdict": validator_verdict,
+            "validator_verdict": None,
+            "quality_verdict": None,
             "image_ref": image_ref,
             "created_at": datetime.utcnow().isoformat(),
         }
@@ -398,20 +385,10 @@ class OrchestratorAgent:
         _latest_edit[session_id] = edit_id
 
         # ------------------------------------------------------------------
-        # 6. Build response
+        # 5. Build response
         # ------------------------------------------------------------------
-        result_b64 = _cv2_to_b64(result_image)
         latency_ms = int((time.time() - t_start) * 1000)
-
         explanation = plan.get("intent", "편집이 완료됐습니다.")
-        if validator_verdict and validator_verdict.get("approved"):
-            leniency_notes = [
-                r["message"]
-                for r in validator_verdict.get("reasons", [])
-                if r.get("severity") == "warning"
-            ]
-            if leniency_notes:
-                explanation += f" (주의: {'; '.join(leniency_notes)})"
 
         logger.info(
             "Edit completed session=%s edit=%s latency=%dms",
@@ -424,10 +401,27 @@ class OrchestratorAgent:
             "parent_edit_id": parent_edit_id,
             "result_image_b64": result_b64,
             "executed_plan": plan,
+            "validator_verdict": None,
+            "validator_attempts": 0,
+            "quality_verdict": None,
+            "step_logs": step_logs,
             "explanation": explanation,
             "errors": exec_errors,
             "latency_ms": latency_ms,
         }
+
+    # ------------------------------------------------------------------
+    # Session management
+    # ------------------------------------------------------------------
+
+    def reset_session(self, session_id: str) -> None:
+        """Clear the orchestrator's internal state for a session.
+
+        Call this after undo/reset so the next process_edit() uses the
+        caller-provided image_b64 instead of a stale internal image ref.
+        """
+        _latest_edit[session_id] = None
+        _edit_trees[session_id].clear()
 
     # ------------------------------------------------------------------
     # Tree inspection
