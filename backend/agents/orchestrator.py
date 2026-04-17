@@ -27,6 +27,7 @@ import cv2
 import numpy as np
 
 from .planner import PlannerAgent
+from .quality_checker import QualityCheckerAgent
 from .tool_registry import registry as _registry
 from .validator import ValidatorAgent
 
@@ -174,35 +175,52 @@ def _topological_sort(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _execute_plan(
     plan: Dict[str, Any], base_image: np.ndarray
-) -> Tuple[np.ndarray, List[str]]:
+) -> Tuple[np.ndarray, List[str], List[Dict[str, Any]]]:
     """Execute all plan steps.
 
     Returns:
-        (final_image, list_of_execution_errors)
+        (final_image, list_of_execution_errors, step_logs)
     """
     current_image = base_image.copy()
     produced_artifacts: Dict[str, Any] = {}
     errors: List[str] = []
+    step_logs: List[Dict[str, Any]] = []
 
     try:
         steps = _topological_sort(plan.get("steps", []))
     except Exception as exc:
         errors.append(f"Topological sort failed: {exc}")
-        return current_image, errors
+        return current_image, errors, step_logs
 
     for step in steps:
         tool_name = step.get("tool_name", "")
         params = dict(step.get("params", {}))
         produces_key = step.get("produces")
+        step_id = step.get("step_id", "?")
+        t_step = time.time()
 
         # Substitute artifact references in params
         for pk, pv in list(params.items()):
             if isinstance(pv, str) and pv in produced_artifacts:
                 params[pk] = produced_artifacts[pv]
 
+        log: Dict[str, Any] = {
+            "step_id": step_id,
+            "tool_name": tool_name,
+            "params": params,
+            "rationale": step.get("rationale", ""),
+            "status": "pending",
+            "error": None,
+            "latency_ms": 0,
+        }
+
         try:
             tool = _registry.get(tool_name)
         except KeyError as exc:
+            log["status"] = "error"
+            log["error"] = str(exc)
+            log["latency_ms"] = int((time.time() - t_step) * 1000)
+            step_logs.append(log)
             errors.append(str(exc))
             continue
 
@@ -213,19 +231,23 @@ def _execute_plan(
                 current_image = result_img
                 if produces_key is not None and produced is not None:
                     produced_artifacts[produces_key] = produced
+                log["status"] = "success"
                 break
             except Exception as exc:
                 if attempt == 0:
                     logger.warning(
                         "Step %s (%s) failed, retrying: %s",
-                        step["step_id"], tool_name, exc,
+                        step_id, tool_name, exc,
                     )
                 else:
-                    errors.append(
-                        f"Step {step['step_id']} ({tool_name}) failed: {exc}"
-                    )
+                    log["status"] = "error"
+                    log["error"] = str(exc)
+                    errors.append(f"Step {step_id} ({tool_name}) failed: {exc}")
 
-    return current_image, errors
+        log["latency_ms"] = int((time.time() - t_step) * 1000)
+        step_logs.append(log)
+
+    return current_image, errors, step_logs
 
 
 # ---------------------------------------------------------------------------
@@ -236,10 +258,12 @@ class OrchestratorAgent:
     """Stateless orchestrator.  All state lives in module-level dicts."""
 
     MAX_VALIDATOR_ATTEMPTS = 3
+    MAX_QUALITY_ATTEMPTS = 2
 
     def __init__(self) -> None:
         self._planner = PlannerAgent()
         self._validator = ValidatorAgent()
+        self._quality_checker = QualityCheckerAgent()
 
     def process_edit(
         self,
@@ -312,54 +336,108 @@ class OrchestratorAgent:
         available_tools = _registry.list()
 
         # ------------------------------------------------------------------
-        # 3. Planner → [Validator] loop
+        # 3. Outer quality-retry loop
+        #    Each iteration: Planner → Validator → Execute → QualityCheck
+        #    On quality failure, pass visual feedback back to Planner.
         # ------------------------------------------------------------------
         plan: Optional[Dict[str, Any]] = None
         validator_verdict: Optional[Dict[str, Any]] = None
-        feedback: Optional[str] = None
+        quality_verdict: Optional[Dict[str, Any]] = None
+        validator_attempts: int = 0
         plan_errors: List[str] = []
+        result_image = base_image.copy()
+        exec_errors: List[str] = []
+        step_logs: List[Dict[str, Any]] = []
+        result_b64: Optional[str] = None
 
-        for attempt in range(1, self.MAX_VALIDATOR_ATTEMPTS + 1):
-            plan = self._planner.generate_plan(
-                prompt=prompt,
-                ancestor_chain=ancestor_context,
-                image_meta=image_meta,
-                available_tools=available_tools,
-                feedback=feedback,
-                mode=mode,
-            )
+        quality_feedback: Optional[str] = None
 
-            if not use_validator:
-                break
+        for q_attempt in range(1, self.MAX_QUALITY_ATTEMPTS + 1):
+            # --------------------------------------------------------------
+            # 3a. Planner → [Validator] loop
+            # --------------------------------------------------------------
+            plan = None
+            plan_errors = []
+            feedback: Optional[str] = quality_feedback  # seed with quality feedback
 
-            validator_verdict = self._validator.validate(
-                plan=plan,
-                original_prompt=prompt,
-                ancestor_chain=ancestor_context,
-                available_tools=available_tools,
-                attempt_number=attempt,
-            )
-
-            if validator_verdict["approved"]:
-                break
-
-            feedback = validator_verdict.get("feedback_for_planner", "")
-            logger.info(
-                "Validator rejected plan (attempt %d/%d): %s",
-                attempt,
-                self.MAX_VALIDATOR_ATTEMPTS,
-                feedback[:120],
-            )
-
-            if attempt == self.MAX_VALIDATOR_ATTEMPTS:
-                plan_errors.append(
-                    "Validator rejected plan after maximum attempts. "
-                    "Please clarify your request."
+            for attempt in range(1, self.MAX_VALIDATOR_ATTEMPTS + 1):
+                plan = self._planner.generate_plan(
+                    prompt=prompt,
+                    ancestor_chain=ancestor_context,
+                    image_meta=image_meta,
+                    available_tools=available_tools,
+                    feedback=feedback,
+                    mode=mode,
                 )
-                plan = None
+
+                if not use_validator:
+                    break
+
+                validator_verdict = self._validator.validate(
+                    plan=plan,
+                    original_prompt=prompt,
+                    ancestor_chain=ancestor_context,
+                    available_tools=available_tools,
+                    attempt_number=attempt,
+                )
+                validator_attempts = attempt
+
+                if validator_verdict["approved"]:
+                    break
+
+                feedback = validator_verdict.get("feedback_for_planner", "")
+                logger.info(
+                    "Validator rejected plan (q_attempt=%d, v_attempt=%d/%d): %s",
+                    q_attempt, attempt, self.MAX_VALIDATOR_ATTEMPTS, feedback[:120],
+                )
+
+                if attempt == self.MAX_VALIDATOR_ATTEMPTS:
+                    plan_errors.append(
+                        "Validator rejected plan after maximum attempts. "
+                        "Please clarify your request."
+                    )
+                    plan = None
+
+            if plan is None or plan_errors:
+                break  # can't recover, exit quality loop
+
+            # --------------------------------------------------------------
+            # 3b. Execute plan
+            # --------------------------------------------------------------
+            result_image, exec_errors, step_logs = _execute_plan(plan, base_image)
+            result_b64 = _cv2_to_b64(result_image)
+
+            # --------------------------------------------------------------
+            # 3c. Visual quality check (post-execution)
+            # --------------------------------------------------------------
+            base_b64_for_check = _cv2_to_b64(base_image)
+            quality_verdict = self._quality_checker.check(
+                original_b64=base_b64_for_check,
+                result_b64=result_b64,
+                user_prompt=prompt,
+                executed_plan=plan,
+                available_tools=available_tools,
+            )
+
+            logger.info(
+                "QualityCheck q_attempt=%d/%d score=%.2f approved=%s",
+                q_attempt, self.MAX_QUALITY_ATTEMPTS,
+                quality_verdict["quality_score"],
+                quality_verdict["approved"],
+            )
+
+            if quality_verdict["approved"]:
+                break  # quality is good, done
+
+            if q_attempt < self.MAX_QUALITY_ATTEMPTS:
+                quality_feedback = quality_verdict.get("feedback_for_planner", "")
+                logger.info(
+                    "Quality rejected, retrying with feedback: %s",
+                    quality_feedback[:120] if quality_feedback else "(none)",
+                )
 
         # ------------------------------------------------------------------
-        # 4. Execute plan
+        # 4. Handle plan failure
         # ------------------------------------------------------------------
         if plan is None or plan_errors:
             return {
@@ -368,15 +446,15 @@ class OrchestratorAgent:
                 "parent_edit_id": parent_edit_id,
                 "result_image_b64": None,
                 "executed_plan": plan,
+                "validator_verdict": validator_verdict,
+                "validator_attempts": validator_attempts,
+                "quality_verdict": None,
+                "step_logs": [],
                 "explanation": (
-                    plan_errors[0]
-                    if plan_errors
-                    else "Plan could not be generated."
+                    plan_errors[0] if plan_errors else "Plan could not be generated."
                 ),
                 "errors": plan_errors,
             }
-
-        result_image, exec_errors = _execute_plan(plan, base_image)
 
         # ------------------------------------------------------------------
         # 5. Record new edit node in tree
@@ -391,6 +469,7 @@ class OrchestratorAgent:
             "prompt": prompt,
             "plan": plan,
             "validator_verdict": validator_verdict,
+            "quality_verdict": quality_verdict,
             "image_ref": image_ref,
             "created_at": datetime.utcnow().isoformat(),
         }
@@ -400,22 +479,16 @@ class OrchestratorAgent:
         # ------------------------------------------------------------------
         # 6. Build response
         # ------------------------------------------------------------------
-        result_b64 = _cv2_to_b64(result_image)
         latency_ms = int((time.time() - t_start) * 1000)
 
         explanation = plan.get("intent", "편집이 완료됐습니다.")
-        if validator_verdict and validator_verdict.get("approved"):
-            leniency_notes = [
-                r["message"]
-                for r in validator_verdict.get("reasons", [])
-                if r.get("severity") == "warning"
-            ]
-            if leniency_notes:
-                explanation += f" (주의: {'; '.join(leniency_notes)})"
+        if quality_verdict and not quality_verdict.get("approved"):
+            explanation += f" (품질 점수: {quality_verdict['quality_score']:.2f} — 최선의 결과를 적용했습니다.)"
 
         logger.info(
-            "Edit completed session=%s edit=%s latency=%dms",
+            "Edit completed session=%s edit=%s latency=%dms quality=%.2f",
             session_id, edit_id, latency_ms,
+            quality_verdict["quality_score"] if quality_verdict else -1,
         )
 
         return {
@@ -424,10 +497,27 @@ class OrchestratorAgent:
             "parent_edit_id": parent_edit_id,
             "result_image_b64": result_b64,
             "executed_plan": plan,
+            "validator_verdict": validator_verdict,
+            "validator_attempts": validator_attempts,
+            "quality_verdict": quality_verdict,
+            "step_logs": step_logs,
             "explanation": explanation,
             "errors": exec_errors,
             "latency_ms": latency_ms,
         }
+
+    # ------------------------------------------------------------------
+    # Session management
+    # ------------------------------------------------------------------
+
+    def reset_session(self, session_id: str) -> None:
+        """Clear the orchestrator's internal state for a session.
+
+        Call this after undo/reset so the next process_edit() uses the
+        caller-provided image_b64 instead of a stale internal image ref.
+        """
+        _latest_edit[session_id] = None
+        _edit_trees[session_id].clear()
 
     # ------------------------------------------------------------------
     # Tree inspection

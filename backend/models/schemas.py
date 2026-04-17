@@ -34,6 +34,12 @@ class TrajectoryEventPayload(BaseModel):
     size_bytes: Optional[int] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    # agent pipeline details
+    plan: Optional[Dict[str, Any]] = None
+    validator_verdict: Optional[Dict[str, Any]] = None
+    validator_attempts: Optional[int] = None
+    quality_verdict: Optional[Dict[str, Any]] = None
+    orchestrator_step_logs: Optional[List[Dict[str, Any]]] = None
 
 
 class TrajectoryEvent(BaseModel):
