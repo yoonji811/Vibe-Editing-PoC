@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 load_dotenv()
 
 from routers import session, edit, trajectory
+from agents.router import router as agent_router
 
 app = FastAPI(title="AI Image Editor", version="0.1.0")
 
@@ -35,6 +36,7 @@ app.add_middleware(
 app.include_router(session.router)
 app.include_router(edit.router)
 app.include_router(trajectory.router)
+app.include_router(agent_router)
 
 
 # ---------------------------------------------------------------------------
