@@ -34,9 +34,10 @@ export interface EditResponse {
   latency_ms: number
 }
 
-export async function createSession(file: File): Promise<SessionCreateResponse> {
+export async function createSession(file: File, userNickname: string): Promise<SessionCreateResponse> {
   const form = new FormData()
   form.append('file', file)
+  form.append('user_nickname', userNickname)
   const res = await fetch(`${BASE}/api/session/new`, { method: 'POST', body: form })
   if (!res.ok) throw new Error(await res.text())
   return res.json()

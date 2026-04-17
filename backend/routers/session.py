@@ -6,7 +6,7 @@ from datetime import datetime
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from models.schemas import (
     ChatMessage,
@@ -20,6 +20,7 @@ from models.schemas import (
 )
 import store
 from services.trajectory_store import append_event, save_trajectory
+from services import image_store
 
 router = APIRouter(prefix="/api/session", tags=["session"])
 
@@ -39,7 +40,10 @@ def _decode_upload(data: bytes) -> tuple[str, int, int]:
 
 
 @router.post("/new", response_model=SessionCreateResponse)
-async def create_session(file: UploadFile = File(...)):
+async def create_session(
+    file: UploadFile = File(...),
+    user_nickname: str = Form(...),
+):
     """Upload an image and start a new session."""
     raw = await file.read()
     if len(raw) > MAX_IMAGE_BYTES:
@@ -55,6 +59,9 @@ async def create_session(file: UploadFile = File(...)):
     mime = file.content_type or "image/jpeg"
     filename = file.filename or "upload.jpg"
 
+    # Upload original image to Cloudinary
+    original_url = image_store.upload_image(b64, f"{session_id}/original")
+
     img_info = OriginalImageInfo(
         filename=filename,
         size_bytes=len(raw),
@@ -64,6 +71,7 @@ async def create_session(file: UploadFile = File(...)):
     )
     trajectory = Trajectory(
         session_id=session_id,
+        user_nickname=user_nickname,
         created_at=now,
         updated_at=now,
         original_image=img_info,
@@ -71,6 +79,7 @@ async def create_session(file: UploadFile = File(...)):
 
     session = SessionState(
         session_id=session_id,
+        user_nickname=user_nickname,
         created_at=now,
         current_image_b64=b64,
         edit_history=[b64],
@@ -87,6 +96,7 @@ async def create_session(file: UploadFile = File(...)):
             size_bytes=len(raw),
             width=w,
             height=h,
+            image_url=original_url,
         ),
     )
     append_event(trajectory, event)

@@ -9,12 +9,13 @@ export interface HistoryEntry {
 
 export interface SessionHook {
   sessionId: string | null
+  nickname: string | null
   currentImageB64: string | null
   history: HistoryEntry[]
   chatHistory: api.ChatMessage[]
   isLoading: boolean
   error: string | null
-  uploadImage: (file: File) => Promise<void>
+  uploadImage: (file: File, nickname: string) => Promise<void>
   sendMessage: (text: string) => Promise<void>
   saveImage: () => Promise<void>
   resetSession: () => void
@@ -22,18 +23,20 @@ export interface SessionHook {
 
 export function useSession(): SessionHook {
   const [sessionId, setSessionId] = useState<string | null>(null)
+  const [nickname, setNickname] = useState<string | null>(null)
   const [currentImageB64, setCurrentImageB64] = useState<string | null>(null)
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [chatHistory, setChatHistory] = useState<api.ChatMessage[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const uploadImage = useCallback(async (file: File) => {
+  const uploadImage = useCallback(async (file: File, userNickname: string) => {
     setIsLoading(true)
     setError(null)
     try {
-      const res = await api.createSession(file)
+      const res = await api.createSession(file, userNickname)
       setSessionId(res.session_id)
+      setNickname(userNickname)
       setCurrentImageB64(res.original_image_b64)
       setHistory([{ imageB64: res.original_image_b64, label: 'Original Image', timestamp: new Date().toISOString() }])
       setChatHistory([])
@@ -95,6 +98,7 @@ export function useSession(): SessionHook {
 
   const resetSession = useCallback(() => {
     setSessionId(null)
+    setNickname(null)
     setCurrentImageB64(null)
     setHistory([])
     setChatHistory([])
@@ -103,6 +107,7 @@ export function useSession(): SessionHook {
 
   return {
     sessionId,
+    nickname,
     currentImageB64,
     history,
     chatHistory,

@@ -8,6 +8,8 @@ import HistoryBar from './components/HistoryBar'
 export default function App() {
   const session = useSession()
   const [historyIndex, setHistoryIndex] = useState(0)
+  const [nicknameInput, setNicknameInput] = useState('')
+  const [nickname, setNickname] = useState<string | null>(null)
 
   const displayImage =
     historyIndex < session.history.length
@@ -21,13 +23,66 @@ export default function App() {
     setHistoryIndex(session.history.length)
   }
 
+  const handleNicknameSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    const trimmed = nicknameInput.trim()
+    if (trimmed) setNickname(trimmed)
+  }
+
+  const handleUpload = async (file: File) => {
+    if (!nickname) return
+    await session.uploadImage(file, nickname)
+  }
+
+  const handleReset = () => {
+    session.resetSession()
+    setNickname(null)
+    setNicknameInput('')
+    setHistoryIndex(0)
+  }
+
+  // Step 1: Nickname input
+  if (!nickname) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <form onSubmit={handleNicknameSubmit} className="bg-white rounded-2xl shadow-sm border border-gray-200 p-10 flex flex-col items-center gap-6 w-full max-w-sm">
+          <div className="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center">
+            <svg className="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+            </svg>
+          </div>
+          <div className="text-center">
+            <h1 className="text-xl font-bold text-gray-900">Vibe Editor</h1>
+            <p className="text-sm text-gray-500 mt-1">닉네임을 입력하고 시작하세요</p>
+          </div>
+          <input
+            type="text"
+            value={nicknameInput}
+            onChange={(e) => setNicknameInput(e.target.value)}
+            placeholder="닉네임 입력"
+            maxLength={30}
+            autoFocus
+            className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 text-center"
+          />
+          <button
+            type="submit"
+            disabled={!nicknameInput.trim()}
+            className="w-full bg-blue-500 hover:bg-blue-600 disabled:bg-gray-200 disabled:text-gray-400 text-white font-semibold rounded-xl py-3 text-sm transition-colors"
+          >
+            시작하기
+          </button>
+        </form>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col font-sans">
       {/* Header */}
       <header className="bg-white border-b border-gray-200 flex items-center px-6 py-3 shrink-0">
         <span className="text-lg font-bold text-gray-900 tracking-tight">Vibe Editor</span>
         <div className="flex-1 flex justify-center">
-          <span className="text-xs font-semibold tracking-widest text-blue-600 uppercase">Editor</span>
+          <span className="text-xs font-semibold tracking-widest text-blue-600 uppercase">{nickname}</span>
         </div>
         {session.sessionId && (
           <button
@@ -47,7 +102,7 @@ export default function App() {
               history={session.history}
               currentIndex={historyIndex}
               onSelect={handleHistorySelect}
-              onNewImage={session.resetSession}
+              onNewImage={handleReset}
             />
           ) : (
             <div className="px-4 pt-5">
@@ -64,7 +119,7 @@ export default function App() {
             {session.sessionId && displayImage ? (
               <ImageViewer imageB64={displayImage} />
             ) : (
-              <ImageUploader onUpload={session.uploadImage} isLoading={session.isLoading} />
+              <ImageUploader onUpload={handleUpload} isLoading={session.isLoading} />
             )}
           </main>
 

@@ -26,6 +26,7 @@ class TrajectoryEventPayload(BaseModel):
     model_used: Optional[str] = None
     params: Optional[Dict[str, Any]] = None
     result_image_hash: Optional[str] = None
+    image_url: Optional[str] = None  # Cloudinary URL
     latency_ms: Optional[int] = None
     error: Optional[str] = None
     # image_upload specific
@@ -44,6 +45,7 @@ class TrajectoryEvent(BaseModel):
 
 class Trajectory(BaseModel):
     session_id: str
+    user_nickname: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     original_image: Optional[OriginalImageInfo] = None
@@ -62,6 +64,7 @@ class ChatMessage(BaseModel):
 
 class SessionState(BaseModel):
     session_id: str
+    user_nickname: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     current_image_b64: Optional[str] = None
     edit_history: List[str] = []      # base64 images, max 50

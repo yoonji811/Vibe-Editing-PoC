@@ -3,6 +3,7 @@ import hashlib
 import logging
 import time
 import traceback
+import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
@@ -18,7 +19,7 @@ from models.schemas import (
     TrajectoryEventPayload,
 )
 import store
-from services import intent_router, opencv_editor, gemini_editor
+from services import intent_router, opencv_editor, gemini_editor, image_store
 from services.trajectory_store import append_event
 
 router = APIRouter(prefix="/api/edit", tags=["edit"])
@@ -122,11 +123,23 @@ async def _edit_image(session_id: str, req: EditRequest):
     latency_ms = int((time.time() - t0) * 1000)
 
     # Update session history
-    if result_b64 and result_b64 != session.current_image_b64:
+    image_changed = result_b64 and result_b64 != session.current_image_b64
+    if image_changed:
         session.current_image_b64 = result_b64
         session.edit_history.append(result_b64)
         if len(session.edit_history) > MAX_HISTORY:
             session.edit_history = session.edit_history[-MAX_HISTORY:]
+
+    # Upload result image to Cloudinary (only when image actually changed)
+    result_url: str | None = None
+    if image_changed and result_b64:
+        event_id = str(uuid.uuid4())
+        step = len(session.edit_history)
+        result_url = image_store.upload_image(
+            result_b64, f"{session_id}/edit_{step:03d}"
+        )
+    else:
+        event_id = str(uuid.uuid4())
 
     # Add assistant reply to chat history
     session.chat_history.append(ChatMessage(role="assistant", content=response_text))
@@ -142,6 +155,7 @@ async def _edit_image(session_id: str, req: EditRequest):
                 engine_used=engine,
                 params=params,
                 result_image_hash=_image_hash(result_b64) if result_b64 else None,
+                image_url=result_url,
                 latency_ms=latency_ms,
                 error=error_msg,
             ),
