@@ -30,7 +30,7 @@ def _get_conn():
         database=p.path.lstrip("/"),
         user=p.username,
         password=p.password,
-        ssl_context=True,
+        ssl_context=False,
     )
 
 
