@@ -26,7 +26,7 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY", ""))
 
 logger = logging.getLogger(__name__)
 
-_MODEL = "gemini-2.0-flash-exp-image-generation"
+_MODEL = "gemini-2.5-flash-image"
 
 
 # ---------------------------------------------------------------------------
@@ -62,12 +62,7 @@ def _call_gemini_image(image: np.ndarray, prompt: str) -> np.ndarray:
         )
     )
 
-    model = genai.GenerativeModel(
-        _MODEL,
-        generation_config=genai.types.GenerationConfig(
-            response_modalities=["IMAGE", "TEXT"],
-        ),
-    )
+    model = genai.GenerativeModel(_MODEL)
     response = model.generate_content([prompt, image_part])
 
     for part in response.parts:
@@ -87,9 +82,10 @@ class GeminiGenerativeEditTool(Tool):
     tool_type = "generative"
     description = (
         "Gemini 생성형 AI로 자유로운 이미지 편집을 수행합니다. "
-        "배경 교체, 객체 추가/제거, 스타일 변환, 텍스트 삽입 등 "
-        "OpenCV로 불가능한 복잡한 편집에 사용합니다. "
-        "instruction에 원하는 편집 내용을 구체적으로 작성하세요."
+        "색감/분위기/톤 변경(따뜻한, 차가운, 영화적, 빈티지 등), "
+        "배경 교체, 객체 추가/제거, 스타일 변환 등에 사용합니다. "
+        "OpenCV hue_shift/saturation보다 훨씬 자연스럽고 예쁜 색감 결과를 냅니다. "
+        "instruction에 원하는 편집 내용을 구체적으로 영어로 작성하세요."
     )
     params_schema = {
         "type": "object",
@@ -190,9 +186,10 @@ class GeminiStyleTransferTool(Tool):
     name = "gemini_style_transfer"
     tool_type = "generative"
     description = (
-        "Gemini AI로 이미지 전체의 시각적 스타일을 변환합니다. "
-        "애니메이션풍, 유화, 수채화, 사이버펑크, 빈티지 등 예술적 스타일 적용에 사용합니다. "
-        "단순 색조 조정이 아닌 전체적인 분위기 변환이 필요할 때 선택하세요."
+        "Gemini AI로 이미지 전체를 완전히 다른 예술 스타일로 변환합니다. "
+        "애니메이션풍(지브리, 픽사), 유화, 수채화, 연필 스케치, 사이버펑크처럼 "
+        "이미지의 외형 자체를 바꾸는 예술 스타일 변환에만 사용합니다. "
+        "단순 색감/분위기/톤 변경은 split_toning, color_grade, hsl_selective를 사용하세요."
     )
     params_schema = {
         "type": "object",
