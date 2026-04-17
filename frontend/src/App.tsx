@@ -5,11 +5,15 @@ import ImageViewer from './components/ImageViewer'
 import ChatPanel from './components/ChatPanel'
 import HistoryBar from './components/HistoryBar'
 
+type StartMode = 'upload' | 'generate'
+
 export default function App() {
   const session = useSession()
   const [historyIndex, setHistoryIndex] = useState(0)
   const [nicknameInput, setNicknameInput] = useState('')
   const [nickname, setNickname] = useState<string | null>(null)
+  const [startMode, setStartMode] = useState<StartMode>('upload')
+  const [generatePrompt, setGeneratePrompt] = useState('')
 
   const displayImage =
     historyIndex < session.history.length
@@ -34,10 +38,18 @@ export default function App() {
     await session.uploadImage(file, nickname)
   }
 
+  const handleGenerate = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!nickname || !generatePrompt.trim()) return
+    await session.generateFromText(generatePrompt.trim(), nickname)
+    setHistoryIndex(0)
+  }
+
   const handleReset = () => {
     session.resetSession()
     setNickname(null)
     setNicknameInput('')
+    setGeneratePrompt('')
     setHistoryIndex(0)
   }
 
@@ -114,16 +126,77 @@ export default function App() {
 
         {/* Main column */}
         <div className="flex flex-1 flex-col min-h-0 min-w-0">
-          {/* Image area */}
-          <main className="flex-1 flex items-center justify-center p-6 min-h-0 overflow-hidden">
+          {/* Image area — fixed height so chat is always visible */}
+          <main className="flex items-center justify-center p-4 overflow-hidden shrink-0" style={{ height: '55vh' }}>
             {session.sessionId && displayImage ? (
               <ImageViewer imageB64={displayImage} />
-            ) : (
+            ) : session.isLoading ? (
+              <div className="flex flex-col items-center gap-4">
+                <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                <p className="text-gray-500 text-sm">
+                  {startMode === 'generate' ? '이미지 생성 중...' : '업로드 중...'}
+                </p>
+              </div>
+            ) : startMode === 'upload' ? (
               <ImageUploader onUpload={handleUpload} isLoading={session.isLoading} />
+            ) : (
+              /* Text-to-image input */
+              <form onSubmit={handleGenerate} className="w-full max-w-lg flex flex-col items-center gap-5">
+                <div className="w-12 h-12 bg-purple-50 rounded-xl flex items-center justify-center">
+                  <svg className="w-6 h-6 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.347.346A3.978 3.978 0 0112 16a3.978 3.978 0 01-2.828-1.172l-.347-.346z" />
+                  </svg>
+                </div>
+                <div className="text-center">
+                  <h2 className="text-xl font-bold text-gray-800">Generate from Text</h2>
+                  <p className="text-sm text-gray-500 mt-1">원하는 이미지를 텍스트로 설명하세요</p>
+                </div>
+                <textarea
+                  value={generatePrompt}
+                  onChange={(e) => setGeneratePrompt(e.target.value)}
+                  placeholder="예: A serene mountain lake at sunset with reflections..."
+                  rows={3}
+                  autoFocus
+                  className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-300 resize-none"
+                />
+                <button
+                  type="submit"
+                  disabled={!generatePrompt.trim() || session.isLoading}
+                  className="w-full bg-purple-500 hover:bg-purple-600 disabled:bg-gray-200 disabled:text-gray-400 text-white font-semibold rounded-xl py-3 text-sm transition-colors"
+                >
+                  이미지 생성
+                </button>
+              </form>
             )}
           </main>
 
-          {/* Instruction input — always visible when session active */}
+          {/* Mode toggle — only shown before session starts */}
+          {!session.sessionId && !session.isLoading && (
+            <div className="flex justify-center gap-2 pb-2 shrink-0">
+              <button
+                onClick={() => setStartMode('upload')}
+                className={`text-xs px-4 py-1.5 rounded-full font-medium transition-colors ${
+                  startMode === 'upload'
+                    ? 'bg-blue-500 text-white'
+                    : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                }`}
+              >
+                이미지 업로드
+              </button>
+              <button
+                onClick={() => setStartMode('generate')}
+                className={`text-xs px-4 py-1.5 rounded-full font-medium transition-colors ${
+                  startMode === 'generate'
+                    ? 'bg-purple-500 text-white'
+                    : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                }`}
+              >
+                텍스트로 생성
+              </button>
+            </div>
+          )}
+
+          {/* Chat panel */}
           {session.sessionId && (
             <ChatPanel
               isLoading={session.isLoading}
@@ -133,9 +206,8 @@ export default function App() {
             />
           )}
 
-          {/* Upload error */}
           {!session.sessionId && session.error && (
-            <p className="text-center text-red-500 text-sm pb-4">{session.error}</p>
+            <p className="text-center text-red-500 text-sm pb-4 shrink-0">{session.error}</p>
           )}
         </div>
       </div>

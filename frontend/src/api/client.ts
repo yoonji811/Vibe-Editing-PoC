@@ -59,6 +59,15 @@ export async function editImage(sessionId: string, userText: string): Promise<Ed
   return res.json()
 }
 
+export async function generateSession(prompt: string, userNickname: string): Promise<SessionCreateResponse> {
+  const form = new FormData()
+  form.append('prompt', prompt)
+  form.append('user_nickname', userNickname)
+  const res = await fetch(`${BASE}/api/session/generate`, { method: 'POST', body: form })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function recordSave(sessionId: string): Promise<void> {
   await fetch(`${BASE}/api/trajectory/${sessionId}/save`, { method: 'POST' })
 }

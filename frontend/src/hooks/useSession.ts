@@ -16,6 +16,7 @@ export interface SessionHook {
   isLoading: boolean
   error: string | null
   uploadImage: (file: File, nickname: string) => Promise<void>
+  generateFromText: (prompt: string, nickname: string) => Promise<void>
   sendMessage: (text: string) => Promise<void>
   saveImage: () => Promise<void>
   resetSession: () => void
@@ -39,6 +40,23 @@ export function useSession(): SessionHook {
       setNickname(userNickname)
       setCurrentImageB64(res.original_image_b64)
       setHistory([{ imageB64: res.original_image_b64, label: 'Original Image', timestamp: new Date().toISOString() }])
+      setChatHistory([])
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setIsLoading(false)
+    }
+  }, [])
+
+  const generateFromText = useCallback(async (prompt: string, userNickname: string) => {
+    setIsLoading(true)
+    setError(null)
+    try {
+      const res = await api.generateSession(prompt, userNickname)
+      setSessionId(res.session_id)
+      setNickname(userNickname)
+      setCurrentImageB64(res.original_image_b64)
+      setHistory([{ imageB64: res.original_image_b64, label: 'Generated Image', timestamp: new Date().toISOString() }])
       setChatHistory([])
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -114,6 +132,7 @@ export function useSession(): SessionHook {
     isLoading,
     error,
     uploadImage,
+    generateFromText,
     sendMessage,
     saveImage,
     resetSession,

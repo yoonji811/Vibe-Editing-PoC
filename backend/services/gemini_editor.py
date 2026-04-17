@@ -22,6 +22,27 @@ Important:
 """
 
 
+def generate_image(prompt: str) -> Tuple[Optional[str], str]:
+    """Generate an image from a text prompt using Gemini."""
+    try:
+        model = genai.GenerativeModel(_EDIT_MODEL)
+        response = model.generate_content(f"Generate an image: {prompt}")
+
+        result_b64: Optional[str] = None
+        text_parts: list[str] = []
+
+        for part in response.parts:
+            if hasattr(part, "inline_data") and part.inline_data and part.inline_data.data:
+                result_b64 = base64.b64encode(part.inline_data.data).decode("utf-8")
+            elif hasattr(part, "text") and part.text:
+                text_parts.append(part.text)
+
+        response_text = " ".join(text_parts).strip() or "이미지 생성 완료"
+        return result_b64, response_text
+    except Exception as exc:
+        return None, f"이미지 생성 중 오류: {exc}"
+
+
 def edit_image(image_b64: str, instruction: str, operation: str) -> Tuple[Optional[str], str]:
     """
     Edit image using Gemini's multimodal image generation.
