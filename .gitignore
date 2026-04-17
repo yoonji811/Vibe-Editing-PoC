@@ -17,3 +17,6 @@ frontend/.vite/
 # OS
 .DS_Store
 Thumbs.db
+
+# Dev log (local only)
+devlog_*.md
