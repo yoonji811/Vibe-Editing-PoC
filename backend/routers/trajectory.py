@@ -38,7 +38,7 @@ async def export_all_trajectories():
         conn = pg8000.connect(
             host=p.hostname, port=p.port or 5432,
             database=p.path.lstrip("/"), user=p.username,
-            password=p.password, ssl_context=True,
+            password=p.password, ssl_context=False,
         )
         try:
             cur = conn.cursor()
