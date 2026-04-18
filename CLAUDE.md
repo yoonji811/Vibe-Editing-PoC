@@ -15,9 +15,9 @@ OpenCV 기반 전통적 편집 + Gemini API 기반 생성형 편집을 하나의
 | Frontend | React + Vite + TailwindCSS | 모바일 대응, 빠른 개발 |
 | Backend | FastAPI (Python) | OpenCV, Pillow 연동 용이 |
 | Image Processing | OpenCV, Pillow | 전통적 편집 |
-| AI Routing / LLM | Gemini 2.5 Flash (`gemini-2.5-flash`) | 사용자 의도 파악, 세션 컨텍스트 추론 |
-| AI Image Editing | Gemini 2.5 Flash Image (`gemini-2.5-flash-image`) | 생성형 이미지 편집 |
-| Trajectory Storage | JSON files (→ 추후 DB 마이그레이션 가능) | 단순, 이식성 좋음 |
+| AI Routing / LLM | Gemini 2.5 Flash (`gemini-2.5-flash`) | Planner(편집 계획 생성), Validator(의미 검증) |
+| AI Image Editing | Gemini 2.5 Flash Image (`gemini-2.5-flash-image`) | 생성형 이미지 편집, 텍스트→이미지 생성 |
+| Trajectory Storage | JSON files / PostgreSQL | 로컬은 JSON, 배포는 PostgreSQL (Railway) |
 | 배포 | Railway (백엔드) + Vercel (프론트) | 무료 티어, 모바일 접근 용이 |
 
 ---
@@ -26,40 +26,30 @@ OpenCV 기반 전통적 편집 + Gemini API 기반 생성형 편집을 하나의
 
 ```
 image-editor/
-├── CLAUDE.md                  # 이 파일
-├── .env.example               # 환경변수 템플릿
-├── frontend/
-│   ├── package.json
-│   ├── vite.config.ts
-│   ├── tailwind.config.js
-│   ├── index.html
-│   └── src/
-│       ├── App.tsx
-│       ├── components/
-│       │   ├── ImageUploader.tsx   # 드래그앤드롭 업로드
-│       │   ├── ChatPanel.tsx       # 채팅 UI
-│       │   ├── ImageViewer.tsx     # 현재/이전 이미지 비교
-│       │   └── HistoryBar.tsx      # 세션 내 편집 이력
-│       ├── hooks/
-│       │   └── useSession.ts       # 세션 상태 관리
-│       └── api/
-│           └── client.ts           # FastAPI 통신
+├── CLAUDE.md
+├── frontend/src/
+│   ├── App.tsx
+│   ├── components/
+│   │   ├── ChatPanel.tsx
+│   │   ├── ImageViewer.tsx     # isLoading 오버레이 포함
+│   │   └── HistoryBar.tsx      # 세션 목록 + 편집 이력
+│   ├── hooks/useSession.ts     # 세션 상태 관리
+│   └── api/client.ts
 └── backend/
-    ├── requirements.txt
-    ├── main.py                     # FastAPI 앱 진입점
+    ├── main.py
     ├── routers/
-    │   ├── session.py              # 세션 CRUD
-    │   ├── edit.py                 # 편집 엔드포인트
-    │   └── trajectory.py          # trajectory 저장/조회
+    │   ├── session.py          # 세션 CRUD + resume/restore/generate
+    │   ├── edit.py             # 편집 → agent pipeline 라우팅
+    │   └── trajectory.py       # trajectory 저장/조회 + /end
+    ├── agents/
+    │   ├── orchestrator.py
+    │   ├── planner.py
+    │   ├── validator.py
+    │   └── tools/              # opencv_tools, color_tools, gemini_tools
     ├── services/
-    │   ├── intent_router.py        # Gemini로 편집 의도 분류
-    │   ├── opencv_editor.py        # OpenCV 편집 함수들
-    │   └── gemini_editor.py        # Gemini 생성형 편집
-    ├── models/
-    │   └── schemas.py              # Pydantic 모델
-    └── data/
-        └── trajectories/           # JSON trajectory 저장소
-            └── .gitkeep
+    │   ├── gemini_editor.py    # generate_image (text-to-image)
+    │   └── image_store.py      # Cloudinary (optional)
+    └── models/schemas.py
 ```
 
 ---
@@ -198,11 +188,11 @@ image-editor/
 
 | 역할 | 모델 ID | 용도 |
 |------|---------|------|
-| Intent Router | `gemini-2.5-flash` | 사용자 텍스트 분석 → opencv / gemini_image / 세션액션 분류, 세션 히스토리 컨텍스트 포함 |
-| 생성형 이미지 편집 | `gemini-2.5-flash-image` | 이미지 입력 → 편집된 이미지 출력 |
+| Planner / Validator | `gemini-2.5-flash` | 편집 Plan JSON 생성, 의미·품질 검증 |
+| 생성형 이미지 편집 | `gemini-2.5-flash-image` | 이미지 입력 → 편집된 이미지 출력, 텍스트→이미지 생성 |
 
 **생성형 편집 기능**: 배경 제거, 객체 제거, 스타일 변환, 인페인팅, 텍스트 추가
-**세션 히스토리**: intent_router 호출 시 직전 편집 이력 전체를 system prompt에 포함해 문맥 유지
+**세션 컨텍스트**: Planner 호출 시 편집 트리(ancestor_chain)를 컨텍스트로 포함해 문맥 유지
 
 ---
 
@@ -225,7 +215,7 @@ cd backend
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+uvicorn main:app --reload --port 8001
 
 # 2. 프론트엔드 (새 터미널)
 cd frontend
@@ -262,7 +252,7 @@ npm run dev
 
 ### 옵션 C — ngrok (로컬 테스트용, 빠름)
 ```bash
-ngrok http 8000  # 백엔드 터널
+ngrok http 8001  # 백엔드 터널
 # 발급된 URL을 프론트의 VITE_API_URL에 설정
 ```
 
@@ -300,11 +290,31 @@ Phase 5 — 배포
 
 ## 주의사항 / 제약
 
-- 이미지는 서버 메모리/임시 디렉토리에서만 처리, 영구 저장 안 함 (trajectory에는 메타데이터만)
+- 이미지는 Cloudinary에 영구 저장됨 (원본 + 편집 결과 각 단계). trajectory에 Cloudinary URL 기록
 - 편집된 이미지 결과는 base64로 프론트에 전달
 - 세션당 편집 이력 최대 50개 (메모리 관리)
 - Gemini API 무료 티어 RPM 제한 고려 → 클라이언트 사이드 debounce 적용
 - 모바일 대응: 이미지 업로드는 카메라 + 갤러리 모두 지원 (`accept="image/*"`)
+
+---
+
+## 구현 지침
+
+**세션 연속성**
+- 과거 세션을 이어서 편집할 때는 기존 세션 ID를 그대로 재사용한다. 새 세션을 만들지 않는다.
+
+**데이터 저장 타이밍**
+- 세션을 종료(New Session, 타이틀 클릭)하기 전에 반드시 서버에 저장 완료를 확인한 뒤 초기화한다.
+
+**편집 소스**
+- 사용자가 현재 화면에서 보고 있는 이미지가 편집의 입력 소스가 된다. 항상 최신 결과가 아닐 수 있다.
+
+**UI 조작 잠금**
+- 편집이 진행 중일 때는 세션 초기화 동작(New Session, 타이틀 클릭)을 막는다.
+
+**스크롤**
+- 페이지 전체 스크롤은 항상 비활성화한다. 스크롤은 이미지 히스토리 탐색에만 사용한다.
+- 히스토리 탐색 스크롤 이벤트는 앱 최초 마운트 시점에 등록한다 (특정 화면 진입 후 등록하면 누락됨).
 
 ---
 
