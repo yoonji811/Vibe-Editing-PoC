@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./venv/Scripts/python.exe -c \"import agents; print\\('agents import OK'\\)\")",
+      "Bash(./venv/Scripts/python.exe -c ' *)",
+      "Bash(timeout 60 ./venv/Scripts/python.exe -c ' *)",
+      "Bash(./venv/Scripts/python.exe -m pip install cloudinary -q)",
+      "Bash(timeout 20 ./venv/Scripts/python.exe -c ' *)"
+    ]
+  }
+}
