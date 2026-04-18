@@ -54,6 +54,9 @@ async def _edit_image(session_id: str, req: EditRequest):
     if not user_text:
         raise HTTPException(status_code=400, detail="user_text is empty")
 
+    # Use provided image as source (viewer-driven edit), else use session's latest
+    source_image = req.input_image_b64 or session.current_image_b64
+
     # Record chat input
     session.chat_history.append(ChatMessage(role="user", content=user_text))
     append_event(
@@ -94,17 +97,17 @@ async def _edit_image(session_id: str, req: EditRequest):
     # --- OpenCV edit ---
     elif intent == "opencv" and operation:
         try:
-            result_b64 = opencv_editor.apply_edit(session.current_image_b64, operation, params)
+            result_b64 = opencv_editor.apply_edit(source_image, operation, params)
             engine = "opencv"
         except Exception as exc:
             error_msg = str(exc)
             response_text = f"편집 중 오류가 발생했습니다: {exc}"
-            result_b64 = session.current_image_b64
+            result_b64 = source_image
 
     # --- Gemini generative edit ---
     elif intent == "gemini_generative" and operation:
         result_b64, gemini_text = gemini_editor.edit_image(
-            session.current_image_b64, user_text, operation
+            source_image, user_text, operation
         )
         engine = "gemini"
         if result_b64 is None:
@@ -117,7 +120,7 @@ async def _edit_image(session_id: str, req: EditRequest):
 
     # --- Clarify ---
     else:
-        result_b64 = session.current_image_b64
+        result_b64 = source_image
         response_text = response_text or "어떤 편집을 원하시나요?"
 
     latency_ms = int((time.time() - t0) * 1000)

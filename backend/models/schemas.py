@@ -96,6 +96,7 @@ class SessionInfoResponse(BaseModel):
 
 class EditRequest(BaseModel):
     user_text: str
+    input_image_b64: Optional[str] = None  # If set, use this as source instead of session.current_image_b64
 
 
 class EditResponse(BaseModel):
