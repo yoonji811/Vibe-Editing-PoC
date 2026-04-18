@@ -26,6 +26,7 @@ class TrajectoryEventPayload(BaseModel):
     model_used: Optional[str] = None
     params: Optional[Dict[str, Any]] = None
     result_image_hash: Optional[str] = None
+    image_url: Optional[str] = None  # Cloudinary URL
     latency_ms: Optional[int] = None
     error: Optional[str] = None
     # image_upload specific
@@ -33,6 +34,12 @@ class TrajectoryEventPayload(BaseModel):
     size_bytes: Optional[int] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    # agent pipeline details
+    plan: Optional[Dict[str, Any]] = None
+    validator_verdict: Optional[Dict[str, Any]] = None
+    validator_attempts: Optional[int] = None
+    quality_verdict: Optional[Dict[str, Any]] = None
+    orchestrator_step_logs: Optional[List[Dict[str, Any]]] = None
 
 
 class TrajectoryEvent(BaseModel):
@@ -44,6 +51,7 @@ class TrajectoryEvent(BaseModel):
 
 class Trajectory(BaseModel):
     session_id: str
+    user_nickname: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     original_image: Optional[OriginalImageInfo] = None
@@ -62,6 +70,7 @@ class ChatMessage(BaseModel):
 
 class SessionState(BaseModel):
     session_id: str
+    user_nickname: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     current_image_b64: Optional[str] = None
     edit_history: List[str] = []      # base64 images, max 50
@@ -93,6 +102,7 @@ class SessionInfoResponse(BaseModel):
 
 class EditRequest(BaseModel):
     user_text: str
+    input_image_b64: Optional[str] = None  # If set, use this as source instead of session.current_image_b64
 
 
 class EditResponse(BaseModel):
