@@ -138,17 +138,19 @@ export default function HistoryBar({
                       const steps = (detail as SessionDetail).steps
                       const isLast = i === steps.length - 1
                       const isActive = activePastSessionId === s.session_id && activePastStepIdx === i
+                      const hasImage = !!step.imageUrl
                       return (
                         <div key={i} className="relative flex gap-0">
                           {!isLast && (
                             <div className="absolute left-[5px] top-4 bottom-0 w-px bg-gray-100" />
                           )}
                           <button
-                            onClick={() => onPastStepSelect(s.session_id, steps, i)}
-                            className="flex gap-2.5 items-start py-1.5 w-full text-left group"
+                            onClick={() => hasImage ? onPastStepSelect(s.session_id, steps, i) : undefined}
+                            disabled={!hasImage}
+                            className={`flex gap-2.5 items-start py-1.5 w-full text-left group ${hasImage ? '' : 'opacity-40 cursor-not-allowed'}`}
                           >
                             <div className={`w-2.5 h-2.5 rounded-full mt-0.5 shrink-0 transition-colors ${
-                              isActive ? 'bg-blue-500' : 'bg-gray-200 group-hover:bg-blue-400'
+                              isActive ? 'bg-blue-500' : hasImage ? 'bg-gray-200 group-hover:bg-blue-400' : 'bg-gray-200'
                             }`} />
                             <span className={`text-[10px] leading-snug break-words transition-colors ${
                               isActive ? 'font-bold text-gray-900' : 'text-gray-500 group-hover:text-gray-800'
