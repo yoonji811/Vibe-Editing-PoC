@@ -59,7 +59,11 @@ async def catch_exceptions(request: Request, call_next):
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    from services import image_store
+    return {
+        "status": "ok",
+        "cloudinary": "configured" if image_store._configured else "not configured",
+    }
 
 
 # ---------------------------------------------------------------------------
