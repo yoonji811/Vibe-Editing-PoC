@@ -132,46 +132,6 @@ async def end_session(session_id: str):
     return {"status": "ok", "session_id": session_id}
 
 
-@router.delete("/admin/cleanup")
-async def cleanup_trajectories():
-    """Delete trajectories that have no Cloudinary image_url OR no user_nickname.
-    Temporary admin endpoint — remove after use."""
-    database_url = os.getenv("DATABASE_URL")
-    if not database_url:
-        raise HTTPException(status_code=400, detail="No DATABASE_URL configured")
-    try:
-        conn = _db_connect()
-        try:
-            cur = conn.cursor()
-            # Delete rows with no user_nickname
-            cur.execute("""
-                DELETE FROM trajectories
-                WHERE data::jsonb->>'user_nickname' IS NULL
-                   OR data::jsonb->>'user_nickname' = ''
-            """)
-            deleted_no_nick = cur.rowcount
-            # Delete rows where no event has an image_url
-            cur.execute("""
-                DELETE FROM trajectories
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM jsonb_array_elements(data::jsonb->'events') AS ev
-                    WHERE ev->'payload'->>'image_url' IS NOT NULL
-                )
-            """)
-            deleted_no_url = cur.rowcount
-            conn.commit()
-        finally:
-            conn.close()
-        return {
-            "deleted_no_nickname": deleted_no_nick,
-            "deleted_no_cloudinary": deleted_no_url,
-            "total_deleted": deleted_no_nick + deleted_no_url,
-        }
-    except Exception as e:
-        logger.error("cleanup_trajectories failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.post("/{session_id}/save")
 async def record_save(session_id: str):
