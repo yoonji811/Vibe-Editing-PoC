@@ -1,8 +1,11 @@
 """Trajectory retrieval endpoints."""
 import json
+import logging
 import os
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
 
 from models.schemas import Trajectory, TrajectoryEvent, TrajectoryEventPayload
 import store
@@ -30,17 +33,21 @@ async def get_sessions_by_nickname(nickname: str):
     """Return session summaries for a given nickname, oldest first, excluding empty sessions."""
     database_url = os.getenv("DATABASE_URL")
     if database_url:
-        conn = _db_connect()
         try:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT data FROM trajectories WHERE data->>'user_nickname' = %s ORDER BY updated_at ASC",
-                (nickname,),
-            )
-            rows = cur.fetchall()
-        finally:
-            conn.close()
-        raw_list = [json.loads(row[0]) for row in rows]
+            conn = _db_connect()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT data FROM trajectories WHERE data::jsonb->>'user_nickname' = %s ORDER BY updated_at ASC",
+                    (nickname,),
+                )
+                rows = cur.fetchall()
+            finally:
+                conn.close()
+            raw_list = [json.loads(row[0]) for row in rows]
+        except Exception as e:
+            logger.error("DB query failed in get_sessions_by_nickname: %s", e)
+            return []
     else:
         from pathlib import Path
         traj_dir = Path(os.getenv("TRAJECTORY_DIR", "./data/trajectories"))
