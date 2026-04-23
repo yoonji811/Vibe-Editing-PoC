@@ -132,7 +132,7 @@ export default function App() {
     setPastView({ sessionId, steps, idx })
   }
 
-  const handleSend = async (text: string) => {
+  const handleSend = async (text: string, selectedRecommendationIndex?: number) => {
     if (pastView) {
       // Resume from the selected past step image, then apply the edit
       const imageUrl = pastView.steps[pastView.idx]?.imageUrl
@@ -153,7 +153,7 @@ export default function App() {
       ? session.history[historyIndex]?.imageB64
       : undefined
 
-    await session.sendMessage(text, inputB64)
+    await session.sendMessage(text, inputB64, selectedRecommendationIndex)
     // historyIndex updated by the useEffect watching session.history.length
   }
 
@@ -401,6 +401,8 @@ export default function App() {
               onSend={handleSend}
               onSave={session.saveImage}
               error={session.error}
+              recommendations={session.recommendations}
+              isLoadingRecommendations={session.isLoadingRecommendations}
             />
           ) : (
             <div className="bg-white border-t border-gray-200 px-6 py-4 shrink-0">
