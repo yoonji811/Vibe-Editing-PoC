@@ -6,8 +6,8 @@ POST /api/feedback/{session_id}
 """
 from __future__ import annotations
 
-import asyncio
 import logging
+import threading
 
 from fastapi import APIRouter, HTTPException
 
@@ -70,25 +70,20 @@ async def record_feedback(session_id: str, body: FeedbackRequest):
             detail=f"Event {body.target_event_id} not found in session {session_id}",
         )
 
-    # Async Memory Agent indexing for positive feedback
-    if body.reward_score >= 0.8:
-        trajectory = load_trajectory(session_id)
-        if trajectory:
-            for event in trajectory.events:
-                if event.event_id == body.target_event_id:
-                    p = event.payload
-                    loop = asyncio.get_event_loop()
-                    loop.run_in_executor(
-                        None,
-                        _async_index,
-                        session_id,
-                        body.target_event_id,
-                        p.plan or {},
-                        p.user_text or "",
-                        p.source_image_context or {},
-                        body.reward_score,
-                    )
-                    break
+    # Re-index in Memory Agent with updated score (always, so score is kept fresh)
+    trajectory = load_trajectory(session_id)
+    if trajectory:
+        for event in trajectory.events:
+            if event.event_id == body.target_event_id:
+                p = event.payload
+                threading.Thread(
+                    target=_async_index,
+                    args=(session_id, body.target_event_id,
+                          p.plan or {}, p.user_text or "",
+                          p.source_image_context or {}, body.reward_score),
+                    daemon=True,
+                ).start()
+                break
 
     return {
         "status": "ok",

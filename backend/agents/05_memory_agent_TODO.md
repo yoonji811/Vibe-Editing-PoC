@@ -15,19 +15,18 @@
 
 단순한 텍스트가 아니라, *[요청 + 사진 상태(VLM) + 성공한 결과]*를 하나의 지식 단위로 묶어 저장합니다.
 
-- [ ] **1.1 성공 사례 추출 (Success Extraction)**
-  - `TrajectoryEvent` 중 `satisfaction_score >= 0.8`인 이벤트를 수집
-  - 입력 데이터 정규화: `[Prompt: "필름 느낌"] + [ImageMeta: "저채도, 인물 사진"]`
+- [x] **1.1 사례 추출 (Extraction)** — 설계 변경: score 필터 없이 모든 편집 인덱싱
+  - 편집 완료 시 자동 인덱싱 (score=0.5 neutral), 피드백 수신 시 score 업데이트
+  - good/bad 모두 저장 → Planner가 실패 패턴도 학습 가능
 
-- [ ] **1.2 벡터 임베딩 생성 (Embedding)**
-  - `text-embedding-3-small` (OpenAI/Gemini) 등을 활용
-  - 메타데이터 필수 항목:
-    - `intent`: 사용자의 의도 요약
-    - `tools_used`: 사용된 툴 리스트 및 파라미터 (JSON)
-    - `rationale`: Planner의 성공적인 추론 내용
+- [x] **1.2 벡터 임베딩 생성 (Embedding)**
+  - ChromaDB 내장 `all-MiniLM-L6-v2` 사용 (로컬 PoC)
+  - 임베딩 텍스트: `"User Request: {text} | Scene: {scene} | Mood: {mood} | ..."`
+  - 메타데이터: `session_id`, `satisfaction_score`, `is_correction_case`, `user_text`, `plan_json`
 
-- [ ] **1.3 벡터 DB 적재**
-  - `ChromaDB` (로컬/PoC) 또는 `Pinecone` (클라우드) 활용
+- [x] **1.3 벡터 DB 적재**
+  - ChromaDB PersistentClient (`./data/chromadb`) 구현 완료
+  - upsert 방식 — 동일 `event_id`로 재호출 시 score 업데이트
 
 ---
 
@@ -35,35 +34,52 @@
 
 사용자의 현재 요청과 가장 유사한 "과거의 성공적인 대응"을 찾아 Planner에게 전달합니다.
 
-- [ ] **2.1 유사 사례 검색 API (Memory Retrieval)**
-  - Orchestrator에서 사용자의 입력을 받으면 Memory Agent를 호출
-  - `Current Prompt + Current VLM Image Meta`를 쿼리로 사용
-  - Top-K (최적 2~3개) 검색 결과 반환
+- [x] **2.1 유사 사례 검색 API (Memory Retrieval)**
+  - `MemoryAgent.search_similar(user_text, vlm_context, is_correction, top_k=3)` 구현
+  - `user_text + VLM context` 결합 텍스트로 쿼리, 코사인 유사도 0.25 이상만 반환
+  - Orchestrator에서 VLM 분석 직후 동기 호출
 
-- [ ] **2.2 피드백 보정 검색 (Feedback Correction Retrieval)**
-  - 만약 현재 요청이 "수정 요청(Correction)"인 경우, **"잘못된 플랜을 어떻게 수정해서 성공했는지"**에 대한 사례를 우선 검색
-  - 예: "너무 밝아" → "밝기 조절 실패 후 CLAHE로 수정 성공한 사례" 검색
+- [x] **2.2 피드백 보정 검색 (Feedback Correction Retrieval)**
+  - `is_correction=True` 시 `where={"is_correction_case": "true"}` 필터 우선 적용
+  - 교정 사례 없으면 전체 검색으로 폴백
 
 ---
 
 ### Phase 3: Planner(LLM) 프롬프트 연동
 
-- [ ] **3.1 Planner 시스템 프롬프트 업데이트**
-  - `planner.py` 내 `_SYSTEM` 프롬프트에 `## Reference Success Cases` 섹션 추가
+- [x] **3.1 Planner 시스템 프롬프트 업데이트**
+  - `planner.py` 내 `## Reference Success Cases from Memory (RAG)` 섹션 추가
 
-- [ ] **3.2 Few-Shot 동적 주입**
-  - 검색된 사례를 아래 형식으로 주입하여 Planner가 학습하도록 함:
+- [x] **3.2 Few-Shot 동적 주입**
+  - `_render_retrieved_cases()` 함수로 포맷팅하여 Planner 프롬프트에 주입:
     ```text
-    [Reference 1]
-    Current Problem: 사진이 너무 어둡고 푸른 톤임
-    User Asked: "따뜻하게 밝혀줘"
-    Successful Plan: split_toning(highlights_hue=35, ..) -> brightness(value=15)
+    [Case 1: similarity 82%]
+    User Asked: "따뜻한 분위기로"
+    Applied Plan: split_toning({highlights_hue: 35, shadows_hue: 25, ...})
+    Satisfaction: 1.00
     ```
+  - Planner rationale에 "RAG cases 1, 2, 3 참조" 명시 지시 확인됨
 
 ---
 
 ## 개발 핵심 팁
 
-- **데이터 오염 방지**: `negative` 피드백이 담긴 사례는 임베딩 저장소에서 제외하거나, 명확히 `unsuccessful_case`로 표시하여 Planner가 피하도록 해야 함
+- **데이터 오염 방지**: ~~`negative` 피드백 사례는 제외~~ → **설계 변경**: good/bad 모두 저장.
+  `satisfaction_score`를 메타데이터로 저장하므로, 향후 검색 시 score 기반 필터링 가능.
+  현재는 Planner가 `previous_failed_attempts`로 직접 회피하는 방식을 병행 운용 중.
 
-- **이미지 분석(VLM)의 중요성**: 사용자는 똑같이 "예쁘게"라고 말해도, 원본 사진 상태(어두움 vs 밝음)에 따라 성공 사례가 달라집니다. 따라서 임베딩 시 사진 분석 데이터(VLM Context)를 반드시 포함해야 합니다.
+- **이미지 분석(VLM)의 중요성**: 사용자는 똑같이 "예쁘게"라고 말해도, 원본 사진 상태(어두움 vs 밝음)에 따라 성공 사례가 달라집니다. VLM Context를 임베딩에 포함하여 유사도 정확도 향상 — 구현 완료.
+
+---
+
+## 구현 현황 (2026-04-23 기준)
+
+| 기능 | 상태 | 파일 |
+|------|------|------|
+| ChromaDB 연결 및 컬렉션 관리 | ✅ | `agents/memory_agent.py` |
+| 자동 인덱싱 (편집마다) | ✅ | `routers/edit.py` |
+| 피드백 score 업데이트 + 재인덱싱 | ✅ | `routers/feedback.py` |
+| 배치 인덱싱 (`batch_index_from_trajectory`) | ✅ | `agents/memory_agent.py` |
+| 교정 사례 우선 검색 | ✅ | `agents/memory_agent.py` |
+| Planner RAG 주입 | ✅ | `agents/planner.py` |
+| 외부 임베딩 모델 전환 | ❌ | 현재 내장 모델 사용 |

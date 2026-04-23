@@ -1,5 +1,6 @@
 """Edit endpoint — routes user requests through the multi-agent pipeline."""
 import hashlib
+import threading
 import logging
 import traceback
 import uuid
@@ -26,6 +27,36 @@ router = APIRouter(prefix="/api/edit", tags=["edit"])
 MAX_HISTORY = 50
 
 _orchestrator = OrchestratorAgent()
+
+
+def _run_memory_index(session_id: str, event_id: str, user_text: str,
+                      vlm_context: dict, plan: dict) -> None:
+    try:
+        from agents.memory_agent import MemoryAgent
+        MemoryAgent().index_success(
+            event_id=event_id,
+            session_id=session_id,
+            user_text=user_text,
+            vlm_context=vlm_context,
+            plan=plan,
+            satisfaction_score=0.5,  # neutral default; updated when feedback arrives
+        )
+        logger.info("Auto-indexed edit event=%s", event_id)
+    except Exception as exc:
+        logger.warning("Auto memory index failed event=%s: %s", event_id, exc)
+
+
+def _schedule_memory_index(session_id: str, event_id: str, user_text: str,
+                            vlm_context: dict, plan: dict) -> None:
+    try:
+        t = threading.Thread(
+            target=_run_memory_index,
+            args=(session_id, event_id, user_text, vlm_context, plan),
+            daemon=True,
+        )
+        t.start()
+    except Exception as exc:
+        logger.warning("Could not schedule memory index: %s", exc)
 
 
 def _image_hash(b64: str) -> str:
@@ -179,10 +210,21 @@ async def _edit_image(session_id: str, req: EditRequest):
             orchestrator_step_logs=step_logs,
             source_image_context=source_image_context,
             is_correction=is_correction,
+            timing_ms=timing_ms,
         ),
     )
     edit_event_id = edit_event.event_id
     append_event(session.trajectory, edit_event)
+
+    # Auto-index every successful edit in Memory Agent (non-blocking)
+    if image_changed and not error_msg and plan:
+        _schedule_memory_index(
+            session_id=session_id,
+            event_id=edit_event_id,
+            user_text=user_text,
+            vlm_context=source_image_context or {},
+            plan=plan,
+        )
 
     store.set_session(session_id, session)
 

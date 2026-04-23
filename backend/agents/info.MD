@@ -223,7 +223,7 @@ undo|reset|취소|되돌|correction|change it|not right|too much|too little
 
 **`batch_index_from_trajectory(session_id)`**: trajectory에서 qualifying 이벤트 일괄 인덱싱
 
-**[GAP]** 현재 런타임에서 `index_success()`가 자동으로 호출되는 경로가 없음. `feedback` API로 `satisfaction_score`가 업데이트되어도 자동 인덱싱이 트리거되지 않음. 수동 배치 처리 필요.
+매 편집 성공 후 `routers/edit.py`에서 `_schedule_memory_index()`를 비동기 호출하여 자동 인덱싱. 기본 score=0.5(neutral). 명시적 피드백(`/api/feedback`) 수신 시 score가 업데이트되어 재인덱싱됨.
 
 ---
 
@@ -427,10 +427,12 @@ _image_store: Dict[image_ref, np.ndarray]
 
 ## 6. 현재 코드와 CLAUDE_override_v2.md 간의 GAP 요약
 
-| # | GAP 내용 | 위치 |
-|---|---------|------|
-| 1 | Validator가 항상 bypass됨 (`use_validator` 미전달) | `routers/edit.py:113` |
-| 2 | 피드백 저장 후 Memory Agent 자동 인덱싱 없음 | `routers/feedback.py` |
-| 3 | Orchestrator edit_id ↔ Trajectory event_id 연결 안 됨 | `orchestrator.py`, `trajectory_store.py` |
-| 4 | `quality_verdict` 필드 항상 `null` (QualityChecker 미사용) | `orchestrator.py:530` |
-| 5 | Hydration된 노드는 `image_ref=None` → 서버 재시작 후 첫 편집 시 `image_b64` 필수 | `orchestrator.py:376` |
+| # | GAP 내용 | 상태 | 위치 |
+|---|---------|------|------|
+| 1 | Validator가 항상 bypass됨 (`use_validator` 미전달) | 미수정 | `routers/edit.py` |
+| 2 | 피드백 저장 후 Memory Agent 자동 인덱싱 없음 | ✅ 수정됨 | `routers/edit.py` |
+| 3 | Orchestrator edit_id ↔ Trajectory event_id 연결 안 됨 | 미수정 | `orchestrator.py` |
+| 4 | `quality_verdict` 필드 항상 `null` (QualityChecker 미사용) | 미수정 | `orchestrator.py` |
+| 5 | Hydration된 노드는 `image_ref=None` → 서버 재시작 후 첫 편집 시 `image_b64` 필수 | 미수정 | `orchestrator.py` |
+| 6 | VLM vision+JSON 모드 실패로 `source_image_context: {}` 반환 | ✅ 수정됨 | `agents/llm.py` |
+| 7 | `timing_ms` trajectory에 미저장 | ✅ 수정됨 | `models/schemas.py`, `routers/edit.py` |

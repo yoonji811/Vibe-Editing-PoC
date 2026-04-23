@@ -208,9 +208,11 @@ POST /api/edit/{session_id}  (반복 n회)
 | `plan` | ✅ | 편집 완료 | 전체 Plan JSON (steps, rationale 포함) |
 | `validator_verdict` | ✅ | 편집 완료 | approved, quality_score, attempts |
 | `validator_attempts` | ✅ | 편집 완료 | 몇 번 만에 승인됐는지 |
-| `source_image_context` | ✅ | 편집 완료 | VLM 분석 결과 (V2 신규) |
+| `source_image_context` | ✅ | 편집 완료 | VLM 분석 결과 (gemini-2.5-flash vision) |
 | `orchestrator_step_logs` | ✅ | 편집 완료 | step별 성공/실패/latency |
-| `satisfaction_score` | 🕐 지연 | 피드백 수신 시 | POST /api/feedback/{session_id} |
+| `is_correction` | ✅ | 편집 완료 | LLM 기반 교정 감지 결과 (empty plan 시 null) |
+| `timing_ms` | ✅ | 편집 완료 | 단계별 소요시간 {vlm, memory, planner, validator, tool_exec, total} |
+| `satisfaction_score` | 🕐 지연 | 피드백 수신 시 | POST /api/feedback/{session_id}, 초기 auto-index score=0.5 |
 | `feedback_type` | 🕐 지연 | 피드백 수신 시 | "explicit" \| "implicit" |
 | `model_used` | ❌ 미구현 | - | 항상 null, 코드에서 채우지 않음 |
 | `quality_verdict` | ❌ 미구현 | - | QualityCheckerAgent 미연결 |
@@ -219,37 +221,28 @@ POST /api/edit/{session_id}  (반복 n회)
 
 ## 5. 알려진 문제
 
-### ① plan_id 고정값 버그
-**현상**: 모든 edit_applied 이벤트의 `plan.plan_id`가 동일한 UUID 사용
-```
-"plan_id": "123e4567-e89b-12d3-a456-426614174000"  ← Gemini가 스키마 예시값 그대로 반환
-```
-**원인**: `planner.py`의 `_SYSTEM` 프롬프트 스키마에 예시 UUID가 없음에도 Gemini 모델이
-학습 데이터에서 본 RFC UUID 예시(`123e4567-...`)를 반환함.
-`planner.py`의 자기검사 로직 `if not raw.get("plan_id"): raw["plan_id"] = str(uuid.uuid4())`이
-plan_id가 존재하면 덮어쓰지 않으므로 고정값이 통과됨.
+### ① plan_id 고정값 버그 — ✅ 수정됨
+**수정 내용**: `planner.py:generate_plan()`에서 `raw["plan_id"] = str(uuid.uuid4())`로
+항상 새 UUID를 덮어쓰도록 변경. 실제 trajectory에서 고유 UUID 확인됨.
 
-**수정 방법**:
-```python
-# planner.py — generate_plan() 마지막 부분
-# 현재:
-if not raw.get("plan_id"):
-    raw["plan_id"] = str(uuid.uuid4())
+### ② is_correction trajectory 미기록 — ✅ 수정됨
+**수정 내용**: `TrajectoryEventPayload`에 `is_correction: Optional[bool]` 필드 추가.
+`routers/edit.py`에서 orchestrator 결과의 `is_correction` 값을 `edit_applied` 이벤트에 저장.
+단, **empty plan 리턴 시 orchestrator가 조기 반환하면 `is_correction: null`로 저장됨** (미해결 — TODO 참조).
 
-# 수정: 항상 새 UUID로 덮어쓰기
-raw["plan_id"] = str(uuid.uuid4())
-```
+### ③ 중복 서버 인스턴스 문제 (개발 환경) — ✅ 해결됨
+**해결 방법**: `--reload` 플래그 제거. OneDrive 경로 + asyncio 조합에서 파일 감시 오작동으로
+구버전 코드가 계속 실행되는 문제가 있었음. `uvicorn main:app --port 8002`로 수동 재시작.
+추가로 `asyncio.get_event_loop().run_in_executor()` → `threading.Thread`로 교체하여 안정성 향상.
 
-### ② is_correction trajectory 미기록
-**현상**: Orchestrator가 `is_correction=True`를 감지해도 trajectory에 저장 안 됨.
-**영향**: Memory Agent의 `batch_index_from_trajectory`가 보정 케이스 구분 불가.
-**수정 방법**: `edit.py`의 `edit_applied` 이벤트에 `is_correction` 필드 추가 필요
-(현재 `TrajectoryEventPayload`에 해당 필드 없음).
+### ④ `color_curves` null 파라미터 버그 — ❌ 미수정
+**현상**: Planner가 `red/green/blue` 파라미터를 `null`로 생성하면 툴 실행 시
+`'NoneType' object is not iterable` 에러 발생.
+**수정 방향**: `color_curves` 툴 내부에서 null 파라미터를 건너뛰거나 빈 리스트로 처리 필요.
 
-### ③ 중복 서버 인스턴스 문제 (개발 환경)
-`uvicorn main:app --reload` 실행 시 워커 프로세스가 분리돼 ChromaDB lazy init이
-각 프로세스마다 독립적으로 일어남. 새 데이터 색인 후 서버 재시작 전까지 RAG 검색에서
-해당 케이스가 보이지 않을 수 있음. 프로덕션(단일 프로세스)에서는 해당 없음.
+### ⑤ empty plan 시 `edit_applied` 저장 — ❌ 미수정 (저장 안 하는 게 맞음)
+**현상**: Planner가 empty plan 반환 시에도 `edit_applied` 이벤트가 trajectory에 저장됨.
+**결정**: 실제 편집이 없는 경우는 저장하지 않는 게 올바른 동작. 수정 필요.
 
 ---
 

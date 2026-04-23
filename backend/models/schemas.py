@@ -45,6 +45,7 @@ class TrajectoryEventPayload(BaseModel):
     satisfaction_score: Optional[float] = None
     feedback_type: Optional[str] = None  # "explicit" | "implicit"
     is_correction: Optional[bool] = None  # True if prompt was a correction of prior edit
+    timing_ms: Optional[Dict[str, int]] = None  # {vlm, memory, planner, validator, tool_exec, total}
 
 
 class TrajectoryEvent(BaseModel):

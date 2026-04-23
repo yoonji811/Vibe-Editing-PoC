@@ -1,10 +1,11 @@
-"""Memory Agent — RAG-based success case retrieval and indexing.
+"""Memory Agent — RAG-based edit case retrieval and indexing.
 
 Architecture:
-  - Indexing (offline/async): satisfaction_score >= 0.8 edit events →
-    embed [user_text + VLM context] → upsert to ChromaDB with plan metadata
+  - Indexing (auto, after every edit): ALL edits indexed with satisfaction_score
+    (default 0.5 neutral; updated to 1.0/-1.0 when explicit feedback arrives)
+    embed [user_text + VLM context] → upsert to ChromaDB with plan + score metadata
   - Retrieval (runtime/sync): embed current [user_text + VLM context] →
-    Top-K cosine similarity search → return past successful plans to Planner
+    Top-K cosine similarity search → return past plans to Planner
 
 ChromaDB stores data in ./data/chromadb (local PoC).
 Default embedding: all-MiniLM-L6-v2 via chromadb's built-in function.
@@ -21,8 +22,7 @@ logger = logging.getLogger(__name__)
 
 _DB_PATH = os.getenv("CHROMADB_PATH", "./data/chromadb")
 _COLLECTION_NAME = "vibedit_success_cases"
-_MIN_SCORE = 0.8       # minimum satisfaction_score to index
-_MIN_SIMILARITY = 0.25  # minimum cosine similarity to include in results
+_MIN_SIMILARITY = 0.25  # minimum cosine similarity to include in search results
 
 
 class MemoryAgent:
@@ -95,12 +95,10 @@ class MemoryAgent:
         satisfaction_score: float,
         is_correction: bool = False,
     ) -> None:
-        """Index one successful edit case.
+        """Index one edit case regardless of score (good and bad both stored).
 
-        Skips if satisfaction_score < _MIN_SCORE or ChromaDB unavailable.
+        ChromaDB upsert — calling again with the same event_id updates the entry.
         """
-        if satisfaction_score < _MIN_SCORE:
-            return
         try:
             col = self._get_collection()
         except Exception:
@@ -132,9 +130,7 @@ class MemoryAgent:
         count = 0
         for event in events:
             p = event.payload
-            score = p.satisfaction_score if p.satisfaction_score is not None else 0.0
-            if score < _MIN_SCORE:
-                continue
+            score = p.satisfaction_score if p.satisfaction_score is not None else 0.5
             self.index_success(
                 event_id=event.event_id,
                 session_id=session_id,

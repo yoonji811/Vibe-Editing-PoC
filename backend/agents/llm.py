@@ -77,6 +77,10 @@ def call_llm_vision_json(
 ) -> dict:
     """Call Gemini with one or more images and parse the response as JSON.
 
+    Uses text/plain response mode (not application/json) for vision inputs
+    because some Gemini versions reject structured output with image parts.
+    Falls back to JSON extraction from free-form text.
+
     Args:
         images_b64: List of base64-encoded image strings (no data URI prefix).
     """
@@ -85,21 +89,31 @@ def call_llm_vision_json(
         data = base64.b64decode(b64)
         img = PIL.Image.open(io.BytesIO(data))
         parts.append(img)
+    # Append system instruction inline when provided (vision models may not
+    # support a separate system_instruction parameter in all SDK versions)
+    if system:
+        parts.insert(0, system + "\n\n")
     parts.append(prompt)
 
     generation_config = genai.types.GenerationConfig(
         temperature=temperature,
-        response_mime_type="application/json",
+        response_mime_type="text/plain",
     )
     gemini_model = genai.GenerativeModel(
         model,
-        system_instruction=system,
         generation_config=generation_config,
     )
     response = gemini_model.generate_content(parts)
     text = response.text.strip()
+    # Extract JSON block if wrapped in markdown fences
     if "```" in text:
         match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
         if match:
             text = match.group(1).strip()
+    else:
+        # Find the outermost { ... } block in case of surrounding prose
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start != -1 and end > start:
+            text = text[start:end]
     return json.loads(text)
