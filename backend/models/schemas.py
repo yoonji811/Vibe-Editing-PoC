@@ -40,6 +40,9 @@ class TrajectoryEventPayload(BaseModel):
     validator_attempts: Optional[int] = None
     quality_verdict: Optional[Dict[str, Any]] = None
     orchestrator_step_logs: Optional[List[Dict[str, Any]]] = None
+    # prompt recommendations
+    recommendations: Optional[List[Dict[str, Any]]] = None
+    selected_recommendation_index: Optional[int] = None
 
 
 class TrajectoryEvent(BaseModel):
@@ -103,6 +106,7 @@ class SessionInfoResponse(BaseModel):
 class EditRequest(BaseModel):
     user_text: str
     input_image_b64: Optional[str] = None  # If set, use this as source instead of session.current_image_b64
+    selected_recommendation_index: Optional[int] = None
 
 
 class EditResponse(BaseModel):

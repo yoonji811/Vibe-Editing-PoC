@@ -63,7 +63,10 @@ async def _edit_image(session_id: str, req: EditRequest):
         session.trajectory,
         TrajectoryEvent(
             type="chat_input",
-            payload=TrajectoryEventPayload(user_text=user_text),
+            payload=TrajectoryEventPayload(
+                user_text=user_text,
+                selected_recommendation_index=req.selected_recommendation_index,
+            ),
         ),
     )
 

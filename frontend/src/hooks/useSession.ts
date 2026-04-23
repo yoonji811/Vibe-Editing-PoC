@@ -16,9 +16,11 @@ export interface SessionHook {
   chatHistory: api.ChatMessage[]
   isLoading: boolean
   error: string | null
+  recommendations: api.Recommendation[]
+  isLoadingRecommendations: boolean
   uploadImage: (file: File, nickname: string) => Promise<void>
   generateFromText: (prompt: string, nickname: string) => Promise<void>
-  sendMessage: (text: string, inputImageB64?: string) => Promise<void>
+  sendMessage: (text: string, inputImageB64?: string, selectedRecommendationIndex?: number) => Promise<void>
   resumeAndSend: (originalSessionId: string, imageUrl: string, text: string, userNickname: string, priorSteps?: { text: string; imageUrl: string | null }[], resumeIdx?: number) => Promise<void>
   saveImage: () => Promise<void>
   resetSession: () => void
@@ -32,6 +34,20 @@ export function useSession(): SessionHook {
   const [chatHistory, setChatHistory] = useState<api.ChatMessage[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [recommendations, setRecommendations] = useState<api.Recommendation[]>([])
+  const [isLoadingRecommendations, setIsLoadingRecommendations] = useState(false)
+
+  const fetchRecommendations = useCallback(async (sid: string) => {
+    setIsLoadingRecommendations(true)
+    try {
+      const recs = await api.getRecommendations(sid)
+      setRecommendations(recs)
+    } catch {
+      setRecommendations([])
+    } finally {
+      setIsLoadingRecommendations(false)
+    }
+  }, [])
 
   const uploadImage = useCallback(async (file: File, userNickname: string) => {
     setIsLoading(true)
@@ -43,6 +59,8 @@ export function useSession(): SessionHook {
       setCurrentImageB64(res.original_image_b64)
       setHistory([{ imageB64: res.original_image_b64, label: 'Original Image', timestamp: new Date().toISOString() }])
       setChatHistory([])
+      setRecommendations([])
+      fetchRecommendations(res.session_id)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -60,6 +78,8 @@ export function useSession(): SessionHook {
       setCurrentImageB64(res.original_image_b64)
       setHistory([{ imageB64: res.original_image_b64, label: 'Generated Image', timestamp: new Date().toISOString() }])
       setChatHistory([])
+      setRecommendations([])
+      fetchRecommendations(res.session_id)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -68,7 +88,7 @@ export function useSession(): SessionHook {
   }, [])
 
   const sendMessage = useCallback(
-    async (text: string, inputImageB64?: string) => {
+    async (text: string, inputImageB64?: string, selectedRecommendationIndex?: number) => {
       if (!sessionId) return
       setIsLoading(true)
       setError(null)
@@ -80,7 +100,7 @@ export function useSession(): SessionHook {
       }
       setChatHistory((prev) => [...prev, userMsg])
       try {
-        const res = await api.editImage(sessionId, text, inputImageB64)
+        const res = await api.editImage(sessionId, text, inputImageB64, selectedRecommendationIndex)
         // Assistant reply
         const assistantMsg: api.ChatMessage = {
           role: 'assistant',
@@ -90,6 +110,7 @@ export function useSession(): SessionHook {
         setChatHistory((prev) => [...prev, assistantMsg])
         if (res.result_image_b64) {
           setCurrentImageB64(res.result_image_b64)
+          setRecommendations([])
           const label = res.operation ?? res.intent ?? '편집'
           setHistory((prev) => [
             ...prev,
@@ -177,6 +198,8 @@ export function useSession(): SessionHook {
     setHistory([])
     setChatHistory([])
     setError(null)
+    setRecommendations([])
+    setIsLoadingRecommendations(false)
   }, [])
 
   return {
@@ -187,6 +210,8 @@ export function useSession(): SessionHook {
     chatHistory,
     isLoading,
     error,
+    recommendations,
+    isLoadingRecommendations,
     uploadImage,
     generateFromText,
     sendMessage,
