@@ -1,16 +1,14 @@
-"""Orchestrator Agent — manages edit sessions and runs the full pipeline.
+"""Orchestrator Agent — V2 pipeline with VLM analysis, Memory Agent, and Hydration.
 
-Responsibilities:
-  1. Session & edit-history tree management (stateless instance,
-     state in external store)
-  2. Assemble Planner context
-  3. Conditionally invoke Validator (use_validator flag)
-  4. Execute approved plan step-by-step
-  5. Record new node in edit tree
-  6. Return result to caller
-
-The Orchestrator is the only code that touches the Tool Registry at
-runtime.  It treats tools as black boxes: just calls tool.run().
+V2 Pipeline (per edit request):
+  1. Hydration      — if session not in memory, reconstruct edit tree from trajectory DB
+  2. Base image     — resolve from in-memory store or caller-provided image_b64
+  3. Prompt Analyze — detect if current prompt is a correction (implicit feedback)
+  4. VLM Analyzer   — extract objective image state (noise, tone, scene, ...)
+  5. Memory Agent   — search similar past success cases (RAG Top-K)
+  6. Planner        — generate Plan JSON with RAG cases + negative constraints (no direct VLM)
+  7. Execute        — run approved tool steps in topological order
+  8. Record         — store edit node + VLM context in tree; return response
 """
 from __future__ import annotations
 
@@ -26,10 +24,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from .llm import call_llm_json
+from .memory_agent import MemoryAgent
 from .planner import PlannerAgent
 from .quality_checker import QualityCheckerAgent
 from .tool_registry import registry as _registry
 from .validator import ValidatorAgent
+from .vlm_analyzer import VLMAnalyzerAgent
 
 # Ensure built-in tools are registered
 import agents.tools  # noqa: F401
@@ -37,7 +38,7 @@ import agents.tools  # noqa: F401
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# In-memory session store (PoC — replace with DB for production)
+# In-memory session store
 # ---------------------------------------------------------------------------
 
 # {session_id: {edit_id: EditNode}}
@@ -49,7 +50,10 @@ _latest_edit: Dict[str, Optional[str]] = defaultdict(lambda: None)
 # Image store: {image_ref: np.ndarray}
 _image_store: Dict[str, np.ndarray] = {}
 
-MAX_SESSIONS = 200  # rough cap to prevent runaway memory
+# Track which sessions have been hydrated (avoid repeated DB hits)
+_hydrated_sessions: set = set()
+
+MAX_SESSIONS = 200
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +77,6 @@ def _cv2_to_b64(img: np.ndarray, fmt: str = ".jpg") -> str:
 
 
 def _store_image(img: np.ndarray) -> str:
-    """Save image to in-memory store, return image_ref key."""
     ref = str(uuid.uuid4())
     _image_store[ref] = img.copy()
     return ref
@@ -86,45 +89,30 @@ def _load_image(ref: str) -> np.ndarray:
 
 
 def _compute_image_meta(img: np.ndarray) -> Dict[str, Any]:
-    """Extract lightweight image metadata for Planner context."""
     h, w = img.shape[:2]
-
-    # Dominant colours via k-means on a tiny thumbnail
     thumb = cv2.resize(img, (64, 64))
     pixels = thumb.reshape(-1, 3).astype(np.float32)
     k = min(5, len(pixels))
     _, labels, centers = cv2.kmeans(
-        pixels,
-        k,
-        None,
+        pixels, k, None,
         (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0),
-        3,
-        cv2.KMEANS_RANDOM_CENTERS,
+        3, cv2.KMEANS_RANDOM_CENTERS,
     )
     counts = np.bincount(labels.flatten(), minlength=k)
     order = np.argsort(-counts)
-    dominant = []
-    for i in order[:3]:
-        b, g, r = centers[i].astype(int)
-        dominant.append(f"rgb({r},{g},{b})")
-
-    return {
-        "width": w,
-        "height": h,
-        "dominant_colors": dominant,
-        "detected_objects": [],  # requires separate model
-        "scene_tags": [],        # requires separate model
-    }
+    dominant = [
+        f"rgb({int(centers[i][2])},{int(centers[i][1])},{int(centers[i][0])})"
+        for i in order[:3]
+    ]
+    return {"width": w, "height": h, "dominant_colors": dominant,
+            "detected_objects": [], "scene_tags": []}
 
 
 # ---------------------------------------------------------------------------
 # Edit tree helpers
 # ---------------------------------------------------------------------------
 
-def _get_ancestor_chain(
-    session_id: str, base_edit_id: Optional[str]
-) -> List[Dict[str, Any]]:
-    """Return ancestor nodes from root → base_edit_id (inclusive)."""
+def _get_ancestor_chain(session_id: str, base_edit_id: Optional[str]) -> List[Dict[str, Any]]:
     tree = _edit_trees.get(session_id, {})
     if not tree or base_edit_id is None:
         return []
@@ -144,8 +132,135 @@ def _summarise_plan(plan: Dict[str, Any]) -> str:
     steps = plan.get("steps", [])
     if not steps:
         return "(empty plan)"
-    names = [s.get("tool_name", "?") for s in steps]
-    return " → ".join(names)
+    return " → ".join(s.get("tool_name", "?") for s in steps)
+
+
+def _summarise_params(plan: Dict[str, Any]) -> str:
+    steps = plan.get("steps", [])
+    if not steps:
+        return ""
+    parts = []
+    for s in steps[:3]:
+        tool = s.get("tool_name", "?")
+        params = s.get("params", {})
+        if params:
+            kv = ", ".join(f"{k}={v}" for k, v in list(params.items())[:3])
+            parts.append(f"{tool}({kv})")
+        else:
+            parts.append(tool)
+    return " → ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Hydration — reconstruct edit tree from trajectory DB
+# ---------------------------------------------------------------------------
+
+def _hydrate_session(session_id: str) -> None:
+    """Load edit history from trajectory store into in-memory edit tree.
+
+    Creates metadata-only nodes (no image_ref) so ancestor chain context
+    is available to Planner even after a server restart.
+    """
+    if session_id in _hydrated_sessions:
+        return
+    _hydrated_sessions.add(session_id)
+
+    try:
+        from services.trajectory_store import get_edit_events
+        events = get_edit_events(session_id)
+    except Exception as exc:
+        logger.warning("Hydration failed for session=%s: %s", session_id, exc)
+        return
+
+    prev_edit_id: Optional[str] = None
+    for event in events:
+        p = event.payload
+        edit_id = event.event_id  # use trajectory event_id as edit_id proxy
+        node: Dict[str, Any] = {
+            "edit_id": edit_id,
+            "parent_edit_id": prev_edit_id,
+            "session_id": session_id,
+            "prompt": p.user_text or "",
+            "plan": p.plan or {},
+            "source_image_context": p.source_image_context or {},
+            "image_ref": None,  # pixel data not available after restart
+            "created_at": event.timestamp.isoformat(),
+            "satisfaction_score": p.satisfaction_score,
+            "is_correction": p.is_correction,
+        }
+        _edit_trees[session_id][edit_id] = node
+        _latest_edit[session_id] = edit_id
+        prev_edit_id = edit_id
+
+    if events:
+        logger.info("Hydrated session=%s with %d nodes", session_id, len(events))
+
+
+# ---------------------------------------------------------------------------
+# Correction detection (Next Prompt Analyzer) — LLM-based
+# ---------------------------------------------------------------------------
+
+_CORRECTION_SYSTEM = """\
+You analyze a user's new image editing request to decide whether it expresses
+dissatisfaction with (or a desire to change) the previous edit result.
+
+A correction is any message where the user:
+- Dislikes or rejects the previous result
+- Wants it redone, adjusted, or reversed
+- Indicates the previous change was wrong, too strong, too weak, or off
+
+A new independent request is one that adds something new or edits a different
+aspect without negating the previous edit.
+
+Return ONLY valid JSON — no markdown:
+{"is_correction": true|false, "reason": "<one sentence>"}
+"""
+
+
+def _detect_correction(prompt: str, previous_node: Optional[Dict[str, Any]] = None) -> bool:
+    """Use LLM to determine if the prompt is a correction of the previous edit.
+
+    Falls back to False (non-fatal) if the LLM call fails or there is no
+    previous edit to correct.
+    """
+    if previous_node is None:
+        return False
+
+    prev_intent = previous_node.get("plan", {}).get("intent", "(unknown)")
+    prev_tools = " → ".join(
+        s.get("tool_name", "?")
+        for s in previous_node.get("plan", {}).get("steps", [])
+    ) or "(none)"
+
+    user_prompt = (
+        f'Previous edit — Intent: "{prev_intent}" | Tools: {prev_tools}\n'
+        f'User\'s new message: "{prompt}"\n\n'
+        "Is the new message a correction or expression of dissatisfaction with the previous edit?"
+    )
+    try:
+        result = call_llm_json(
+            user_prompt,
+            system=_CORRECTION_SYSTEM,
+            model="gemini-2.5-flash",
+            temperature=0.0,
+        )
+        return bool(result.get("is_correction", False))
+    except Exception as exc:
+        logger.warning("LLM correction analysis failed, defaulting to False: %s", exc)
+        return False
+
+
+def _build_failed_attempts(node: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract tool+params list from a plan node for negative constraints."""
+    steps = node.get("plan", {}).get("steps", [])
+    return [
+        {
+            "tool_used": s.get("tool_name", ""),
+            "params": s.get("params", {}),
+            "reason_for_failure": "User requested correction/undo.",
+        }
+        for s in steps[:3]  # cap at 3 to keep prompt manageable
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -153,12 +268,11 @@ def _summarise_plan(plan: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def _topological_sort(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Kahn's algorithm — return steps in execution order."""
     id_to_step = {s["step_id"]: s for s in steps}
     in_degree: Dict[str, int] = {s["step_id"]: 0 for s in steps}
     for step in steps:
         for dep in step.get("depends_on", []):
-            in_degree[step["step_id"]] = in_degree[step["step_id"]] + 1
+            in_degree[step["step_id"]] += 1
 
     queue = [sid for sid, deg in in_degree.items() if deg == 0]
     result: List[Dict[str, Any]] = []
@@ -176,11 +290,6 @@ def _topological_sort(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def _execute_plan(
     plan: Dict[str, Any], base_image: np.ndarray
 ) -> Tuple[np.ndarray, List[str], List[Dict[str, Any]]]:
-    """Execute all plan steps.
-
-    Returns:
-        (final_image, list_of_execution_errors, step_logs)
-    """
     current_image = base_image.copy()
     produced_artifacts: Dict[str, Any] = {}
     errors: List[str] = []
@@ -199,7 +308,6 @@ def _execute_plan(
         step_id = step.get("step_id", "?")
         t_step = time.time()
 
-        # Substitute artifact references in params
         for pk, pv in list(params.items()):
             if isinstance(pv, str) and pv in produced_artifacts:
                 params[pk] = produced_artifacts[pv]
@@ -224,7 +332,6 @@ def _execute_plan(
             errors.append(str(exc))
             continue
 
-        # Execute with one retry
         for attempt in range(2):
             try:
                 result_img, produced = tool.run(current_image, **params)
@@ -235,10 +342,7 @@ def _execute_plan(
                 break
             except Exception as exc:
                 if attempt == 0:
-                    logger.warning(
-                        "Step %s (%s) failed, retrying: %s",
-                        step_id, tool_name, exc,
-                    )
+                    logger.warning("Step %s (%s) failed, retrying: %s", step_id, tool_name, exc)
                 else:
                     log["status"] = "error"
                     log["error"] = str(exc)
@@ -255,15 +359,16 @@ def _execute_plan(
 # ---------------------------------------------------------------------------
 
 class OrchestratorAgent:
-    """Stateless orchestrator.  All state lives in module-level dicts."""
+    """Stateless orchestrator with VLM analysis, Memory Agent, and Hydration."""
 
     MAX_VALIDATOR_ATTEMPTS = 3
-    MAX_QUALITY_ATTEMPTS = 2
 
     def __init__(self) -> None:
         self._planner = PlannerAgent()
         self._validator = ValidatorAgent()
         self._quality_checker = QualityCheckerAgent()
+        self._vlm = VLMAnalyzerAgent()
+        self._memory = MemoryAgent()
 
     def process_edit(
         self,
@@ -271,41 +376,42 @@ class OrchestratorAgent:
         image_b64: Optional[str] = None,
         session_id: Optional[str] = None,
         base_edit_id: Optional[str] = None,
-        use_validator: bool = True,
+        use_validator: bool = False,
         mode: str = "prod",
     ) -> Dict[str, Any]:
-        """Run the full edit pipeline.
+        """Run the full V2 edit pipeline.
 
         Args:
             prompt:        User's edit request.
-            image_b64:     Base64 image.  Required when starting a new session
-                           or when base_edit_id is not found.
-            session_id:    Existing session to continue.  None = new session.
-            base_edit_id:  Which edit node to branch from.  None = latest.
-            use_validator: Whether to run Validator between Planner and execution.
-            mode:          "prod" | "dev" passed to Planner.
-
-        Returns:
-            {session_id, edit_id, parent_edit_id, result_image_b64,
-             executed_plan, explanation, errors}
+            image_b64:     Base64 image. Required for new sessions or after restart.
+            session_id:    Existing session to continue. None = new session.
+            base_edit_id:  Edit node to branch from. None = latest.
+            use_validator: Whether to run Validator.
+            mode:          "prod" | "dev".
         """
         t_start = time.time()
 
         # ------------------------------------------------------------------
-        # 1. Resolve session and base image
+        # 1. Session init + Hydration
         # ------------------------------------------------------------------
         if session_id is None:
             session_id = str(uuid.uuid4())
 
-        # Resolve base edit node
         tree = _edit_trees[session_id]
+        if not tree and session_id not in _hydrated_sessions:
+            _hydrate_session(session_id)
+            tree = _edit_trees[session_id]
+
+        # ------------------------------------------------------------------
+        # 2. Resolve base edit node and image
+        # ------------------------------------------------------------------
         if base_edit_id is None:
             base_edit_id = _latest_edit[session_id]
 
         parent_edit_id = base_edit_id
 
-        # Resolve base image
-        if base_edit_id and base_edit_id in tree:
+        # Use image from store if available (has pixel data), else fall back to provided b64
+        if base_edit_id and base_edit_id in tree and tree[base_edit_id].get("image_ref"):
             base_image = _load_image(tree[base_edit_id]["image_ref"])
         elif image_b64:
             base_image = _b64_to_cv2(image_b64)
@@ -321,7 +427,49 @@ class OrchestratorAgent:
             }
 
         # ------------------------------------------------------------------
-        # 2. Build Planner context
+        # 3. Next Prompt Analyzer — detect correction / implicit feedback
+        # ------------------------------------------------------------------
+        previous_failed_attempts: List[Dict[str, Any]] = []
+        previous_node = tree.get(parent_edit_id) if parent_edit_id else None
+        is_correction = _detect_correction(prompt, previous_node)
+
+        if is_correction and previous_node:
+            previous_failed_attempts = _build_failed_attempts(previous_node)
+            logger.info(
+                "Correction detected session=%s; blocking %d tools",
+                session_id, len(previous_failed_attempts),
+            )
+
+        # ------------------------------------------------------------------
+        # 4. VLM Analysis
+        # ------------------------------------------------------------------
+        result_b64_for_vlm = _cv2_to_b64(base_image)
+        source_image_context: Dict[str, Any] = {}
+        t_vlm = time.time()
+        try:
+            source_image_context = self._vlm.analyze(result_b64_for_vlm)
+        except Exception as exc:
+            logger.warning("VLM analysis skipped: %s", exc)
+        t_vlm_ms = int((time.time() - t_vlm) * 1000)
+
+        # ------------------------------------------------------------------
+        # 5. Memory Agent — retrieve similar success cases
+        # ------------------------------------------------------------------
+        retrieved_cases: List[Dict[str, Any]] = []
+        t_mem = time.time()
+        try:
+            retrieved_cases = self._memory.search_similar(
+                user_text=prompt,
+                vlm_context=source_image_context,
+                is_correction=is_correction,
+                top_k=3,
+            )
+        except Exception as exc:
+            logger.warning("Memory search skipped: %s", exc)
+        t_mem_ms = int((time.time() - t_mem) * 1000)
+
+        # ------------------------------------------------------------------
+        # 6. Build Planner context
         # ------------------------------------------------------------------
         ancestor_chain = _get_ancestor_chain(session_id, parent_edit_id)
         ancestor_context = [
@@ -329,6 +477,9 @@ class OrchestratorAgent:
                 "prompt": node["prompt"],
                 "intent": node.get("plan", {}).get("intent", ""),
                 "plan_summary": _summarise_plan(node.get("plan", {})),
+                "params_used": _summarise_params(node.get("plan", {})),
+                "is_correction": node.get("is_correction", False),
+                "satisfaction": node.get("satisfaction_score"),
             }
             for node in ancestor_chain
         ]
@@ -336,15 +487,55 @@ class OrchestratorAgent:
         available_tools = _registry.list()
 
         # ------------------------------------------------------------------
-        # 3. Planner → Execute (Validator/QualityChecker disabled for speed)
+        # 7. Planner → (optional Validator) → Execute
         # ------------------------------------------------------------------
-        plan = self._planner.generate_plan(
-            prompt=prompt,
-            ancestor_chain=ancestor_context,
-            image_meta=image_meta,
-            available_tools=available_tools,
-            mode=mode,
-        )
+        validator_verdict: Optional[Dict[str, Any]] = None
+        validator_attempts = 0
+        feedback: Optional[str] = None
+        plan: Dict[str, Any] = {}
+        t_planner_ms = 0
+        t_validator_ms = 0
+
+        for attempt in range(self.MAX_VALIDATOR_ATTEMPTS):
+            t_plan = time.time()
+            plan = self._planner.generate_plan(
+                prompt=prompt,
+                ancestor_chain=ancestor_context,
+                image_meta=image_meta,
+                available_tools=available_tools,
+                feedback=feedback,
+                mode=mode,
+                retrieved_cases=retrieved_cases,
+                previous_failed_attempts=previous_failed_attempts,
+            )
+            t_planner_ms += int((time.time() - t_plan) * 1000)
+
+            if not plan or not plan.get("steps"):
+                break
+
+            if not use_validator:
+                break
+
+            t_val = time.time()
+            verdict = self._validator.validate(
+                plan=plan,
+                original_prompt=prompt,
+                available_tools=available_tools,
+                ancestor_chain=ancestor_context,
+                attempt_number=attempt + 1,
+            )
+            t_validator_ms += int((time.time() - t_val) * 1000)
+            validator_attempts += 1
+            validator_verdict = verdict if isinstance(verdict, dict) else dict(verdict)
+
+            if verdict.get("approved"):
+                break
+
+            feedback = verdict.get("feedback_for_planner", "")
+            logger.info(
+                "Validator rejected attempt %d session=%s: %s",
+                attempt + 1, session_id, feedback,
+            )
 
         if not plan or not plan.get("steps"):
             return {
@@ -353,19 +544,22 @@ class OrchestratorAgent:
                 "parent_edit_id": parent_edit_id,
                 "result_image_b64": None,
                 "executed_plan": plan,
-                "validator_verdict": None,
-                "validator_attempts": 0,
+                "validator_verdict": validator_verdict,
+                "validator_attempts": validator_attempts,
                 "quality_verdict": None,
                 "step_logs": [],
+                "source_image_context": source_image_context,
                 "explanation": "Plan could not be generated.",
                 "errors": ["Planner returned empty plan."],
             }
 
+        t_exec = time.time()
         result_image, exec_errors, step_logs = _execute_plan(plan, base_image)
+        t_exec_ms = int((time.time() - t_exec) * 1000)
         result_b64 = _cv2_to_b64(result_image)
 
         # ------------------------------------------------------------------
-        # 4. Record new edit node in tree
+        # 8. Record new edit node
         # ------------------------------------------------------------------
         edit_id = str(uuid.uuid4())
         image_ref = _store_image(result_image)
@@ -376,23 +570,32 @@ class OrchestratorAgent:
             "session_id": session_id,
             "prompt": prompt,
             "plan": plan,
-            "validator_verdict": None,
+            "source_image_context": source_image_context,
+            "validator_verdict": validator_verdict,
             "quality_verdict": None,
+            "is_correction": is_correction,
             "image_ref": image_ref,
             "created_at": datetime.utcnow().isoformat(),
         }
         tree[edit_id] = node
         _latest_edit[session_id] = edit_id
 
-        # ------------------------------------------------------------------
-        # 5. Build response
-        # ------------------------------------------------------------------
         latency_ms = int((time.time() - t_start) * 1000)
         explanation = plan.get("intent", "편집이 완료됐습니다.")
 
+        timing_ms = {
+            "vlm": t_vlm_ms,
+            "memory": t_mem_ms,
+            "planner": t_planner_ms,
+            "validator": t_validator_ms,
+            "tool_exec": t_exec_ms,
+            "total": latency_ms,
+        }
+
         logger.info(
-            "Edit completed session=%s edit=%s latency=%dms",
-            session_id, edit_id, latency_ms,
+            "Edit completed session=%s edit=%s | vlm=%dms mem=%dms plan=%dms val=%dms exec=%dms total=%dms",
+            session_id, edit_id,
+            t_vlm_ms, t_mem_ms, t_planner_ms, t_validator_ms, t_exec_ms, latency_ms,
         )
 
         return {
@@ -401,13 +604,17 @@ class OrchestratorAgent:
             "parent_edit_id": parent_edit_id,
             "result_image_b64": result_b64,
             "executed_plan": plan,
-            "validator_verdict": None,
-            "validator_attempts": 0,
+            "validator_verdict": validator_verdict,
+            "validator_attempts": validator_attempts,
             "quality_verdict": None,
             "step_logs": step_logs,
+            "source_image_context": source_image_context,
+            "retrieved_cases": retrieved_cases,
+            "is_correction": is_correction,
             "explanation": explanation,
             "errors": exec_errors,
             "latency_ms": latency_ms,
+            "timing_ms": timing_ms,
         }
 
     # ------------------------------------------------------------------
@@ -415,28 +622,25 @@ class OrchestratorAgent:
     # ------------------------------------------------------------------
 
     def reset_session(self, session_id: str) -> None:
-        """Clear the orchestrator's internal state for a session.
-
-        Call this after undo/reset so the next process_edit() uses the
-        caller-provided image_b64 instead of a stale internal image ref.
-        """
+        """Clear orchestrator internal state for a session (undo/reset)."""
         _latest_edit[session_id] = None
         _edit_trees[session_id].clear()
+        _hydrated_sessions.discard(session_id)
 
     # ------------------------------------------------------------------
     # Tree inspection
     # ------------------------------------------------------------------
 
     def get_tree(self, session_id: str) -> Dict[str, Any]:
-        """Return the full edit tree for a session."""
         tree = _edit_trees.get(session_id, {})
-        nodes = []
-        for node in tree.values():
-            nodes.append({
+        nodes = [
+            {
                 "edit_id": node["edit_id"],
                 "parent_edit_id": node["parent_edit_id"],
                 "prompt": node["prompt"],
                 "intent": node.get("plan", {}).get("intent", ""),
                 "created_at": node["created_at"],
-            })
+            }
+            for node in tree.values()
+        ]
         return {"session_id": session_id, "nodes": nodes}

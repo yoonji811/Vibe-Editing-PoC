@@ -68,6 +68,7 @@ async def _edit_image(session_id: str, req: EditRequest):
     )
 
     result_b64: str | None = None
+    edit_event_id: str | None = None
     intent: str = "agent"
     engine: str | None = "agent"
     operation: str | None = None
@@ -80,6 +81,9 @@ async def _edit_image(session_id: str, req: EditRequest):
     validator_attempts: int | None = None
     quality_verdict: dict | None = None
     step_logs: list | None = None
+    source_image_context: dict | None = None
+    is_correction: bool | None = None
+    timing_ms: dict | None = None
 
     # --- Session actions (undo / reset) ---
     lower = user_text.lower()
@@ -123,6 +127,9 @@ async def _edit_image(session_id: str, req: EditRequest):
         validator_attempts = agent_result.get("validator_attempts")
         quality_verdict = agent_result.get("quality_verdict")
         step_logs = agent_result.get("step_logs")
+        source_image_context = agent_result.get("source_image_context")
+        is_correction = agent_result.get("is_correction")
+        timing_ms = agent_result.get("timing_ms")
 
         steps = executed_plan.get("steps", [])
         if steps:
@@ -154,32 +161,34 @@ async def _edit_image(session_id: str, req: EditRequest):
 
     session.chat_history.append(ChatMessage(role="assistant", content=response_text))
 
-    append_event(
-        session.trajectory,
-        TrajectoryEvent(
-            type="edit_applied",
-            payload=TrajectoryEventPayload(
-                user_text=user_text,
-                intent_classified=intent,
-                engine_used=engine,
-                params=params,
-                result_image_hash=_image_hash(result_b64) if result_b64 else None,
-                image_url=result_url,
-                latency_ms=latency_ms,
-                error=error_msg,
-                plan=plan,
-                validator_verdict=validator_verdict,
-                validator_attempts=validator_attempts,
-                quality_verdict=quality_verdict,
-                orchestrator_step_logs=step_logs,
-            ),
+    edit_event = TrajectoryEvent(
+        type="edit_applied",
+        payload=TrajectoryEventPayload(
+            user_text=user_text,
+            intent_classified=intent,
+            engine_used=engine,
+            params=params,
+            result_image_hash=_image_hash(result_b64) if result_b64 else None,
+            image_url=result_url,
+            latency_ms=latency_ms,
+            error=error_msg,
+            plan=plan,
+            validator_verdict=validator_verdict,
+            validator_attempts=validator_attempts,
+            quality_verdict=quality_verdict,
+            orchestrator_step_logs=step_logs,
+            source_image_context=source_image_context,
+            is_correction=is_correction,
         ),
     )
+    edit_event_id = edit_event.event_id
+    append_event(session.trajectory, edit_event)
 
     store.set_session(session_id, session)
 
     return EditResponse(
         session_id=session_id,
+        event_id=edit_event_id,
         result_image_b64=result_b64,
         chat_message=response_text,
         intent=intent,
@@ -187,4 +196,5 @@ async def _edit_image(session_id: str, req: EditRequest):
         operation=operation,
         params=params,
         latency_ms=latency_ms,
+        timing_ms=timing_ms,
     )

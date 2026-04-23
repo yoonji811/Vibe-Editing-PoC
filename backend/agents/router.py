@@ -52,6 +52,12 @@ class AgentEditResponse(BaseModel):
     explanation: str
     errors: list
     latency_ms: Optional[int] = None
+    source_image_context: Optional[Dict[str, Any]] = None
+    retrieved_cases: Optional[list] = None
+    is_correction: Optional[bool] = None
+    validator_verdict: Optional[Dict[str, Any]] = None
+    validator_attempts: Optional[int] = None
+    timing_ms: Optional[Dict[str, int]] = None
 
 
 # ---------------------------------------------------------------------------

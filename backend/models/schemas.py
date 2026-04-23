@@ -40,6 +40,11 @@ class TrajectoryEventPayload(BaseModel):
     validator_attempts: Optional[int] = None
     quality_verdict: Optional[Dict[str, Any]] = None
     orchestrator_step_logs: Optional[List[Dict[str, Any]]] = None
+    # V2: VLM analysis + feedback
+    source_image_context: Optional[Dict[str, Any]] = None
+    satisfaction_score: Optional[float] = None
+    feedback_type: Optional[str] = None  # "explicit" | "implicit"
+    is_correction: Optional[bool] = None  # True if prompt was a correction of prior edit
 
 
 class TrajectoryEvent(BaseModel):
@@ -107,6 +112,7 @@ class EditRequest(BaseModel):
 
 class EditResponse(BaseModel):
     session_id: str
+    event_id: Optional[str] = None
     result_image_b64: Optional[str] = None
     chat_message: str
     intent: str
@@ -114,3 +120,11 @@ class EditResponse(BaseModel):
     operation: Optional[str] = None
     params: Optional[Dict[str, Any]] = None
     latency_ms: int
+    timing_ms: Optional[Dict[str, int]] = None
+
+
+class FeedbackRequest(BaseModel):
+    target_event_id: str
+    feedback_type: str = "explicit"   # "explicit" | "implicit"
+    action: str                        # "thumbs_up" | "thumbs_down" | "re_prompt"
+    reward_score: float                # 1.0 (positive) | -0.5 (correction) | -1.0 (negative)

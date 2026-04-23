@@ -6,6 +6,7 @@ export interface HistoryEntry {
   imageUrl?: string
   label: string
   timestamp: string
+  eventId?: string
 }
 
 export interface SessionHook {
@@ -93,7 +94,12 @@ export function useSession(): SessionHook {
           const label = res.operation ?? res.intent ?? '편집'
           setHistory((prev) => [
             ...prev,
-            { imageB64: res.result_image_b64!, label, timestamp: new Date().toISOString() },
+            {
+              imageB64: res.result_image_b64!,
+              label,
+              timestamp: new Date().toISOString(),
+              eventId: res.event_id ?? undefined,
+            },
           ])
         }
       } catch (e) {

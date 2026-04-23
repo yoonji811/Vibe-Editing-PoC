@@ -25,6 +25,7 @@ export interface SessionInfoResponse {
 
 export interface EditResponse {
   session_id: string
+  event_id: string | null
   result_image_b64: string | null
   chat_message: string
   intent: string
@@ -166,4 +167,24 @@ export async function getTrajectory(sessionId: string): Promise<any> {
   } catch {
     return null
   }
+}
+
+export type FeedbackAction = 'thumbs_up' | 'thumbs_down'
+
+export async function sendFeedback(
+  sessionId: string,
+  eventId: string,
+  action: FeedbackAction,
+): Promise<void> {
+  const rewardScore = action === 'thumbs_up' ? 1.0 : -1.0
+  await fetch(`${BASE}/api/feedback/${sessionId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      target_event_id: eventId,
+      feedback_type: 'explicit',
+      action,
+      reward_score: rewardScore,
+    }),
+  })
 }
