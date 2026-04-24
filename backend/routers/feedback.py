@@ -18,6 +18,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/feedback", tags=["feedback"])
 
 
+def _get_user_text(trajectory, event_id: str) -> str:
+    if not trajectory:
+        return ""
+    for event in trajectory.events:
+        if event.event_id == event_id:
+            return event.payload.user_text or ""
+    return ""
+
+
 def _async_index(session_id: str, event_id: str, plan: dict, user_text: str,
                  vlm_context: dict, satisfaction_score: float) -> None:
     """Background task: index successful edit in Memory Agent."""
@@ -84,6 +93,15 @@ async def record_feedback(session_id: str, body: FeedbackRequest):
                     daemon=True,
                 ).start()
                 break
+
+    if body.reward_score < 0:
+        logger.info(
+            "[tool-gap] Negative feedback recorded — session=%s event=%s user_text=%r. "
+            "Run `python -m agents.tool_generator feedback` to generate improved tools.",
+            session_id,
+            body.target_event_id,
+            _get_user_text(trajectory, body.target_event_id),
+        )
 
     return {
         "status": "ok",

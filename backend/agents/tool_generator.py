@@ -61,6 +61,92 @@ def _load_trajectories(log_dir: Path) -> List[Dict[str, Any]]:
     return trajs
 
 
+# ---------------------------------------------------------------------------
+# Negative feedback analysis
+# ---------------------------------------------------------------------------
+
+
+def _build_feedback_spec(
+    user_text: str,
+    intent: str,
+    tools_used: List[str],
+    unmet: List[Any],
+    vlm_context: Dict[str, Any],
+) -> str:
+    """Build a rich tool-spec string from a failed edit event."""
+    lines = [
+        f'User request (unsatisfied): "{user_text}"',
+        f'Interpreted intent: "{intent}"',
+        f'Tools attempted: {", ".join(tools_used) if tools_used else "none"}',
+    ]
+    if unmet:
+        lines.append(f"Unmet requirements: {unmet}")
+    if vlm_context:
+        summary = json.dumps(vlm_context, ensure_ascii=False)[:300]
+        lines.append(f"Image context: {summary}")
+    lines.append(
+        "\nThe user gave negative feedback (thumbs_down) — the result was unsatisfactory. "
+        "Generate a new image editing tool that would better fulfill this request. "
+        "Focus on what was missing or visually inadequate in the previous attempt."
+    )
+    return "\n".join(lines)
+
+
+def analyse_negative_feedback(log_dir: Path) -> List[Dict[str, Any]]:
+    """Scan trajectory files for events with negative satisfaction_score (thumbs_down).
+
+    Returns one candidate dict per unsatisfied edit event:
+      {signal, description, frequency, session_ids, event_id,
+       user_text, intent, tools_used, suggested_tool_type}
+    """
+    trajs = _load_trajectories(log_dir)
+    if not trajs:
+        logger.info("No trajectory files found in %s", log_dir)
+        return []
+
+    candidates: List[Dict[str, Any]] = []
+
+    for traj in trajs:
+        session_id = traj.get("session_id", "?")
+        for event in traj.get("events", []):
+            payload = event.get("payload", {})
+            score = payload.get("satisfaction_score")
+            # Only process explicit negative feedback
+            if score is None or score >= 0:
+                continue
+
+            user_text = payload.get("user_text", "").strip()
+            if not user_text:
+                continue
+
+            plan = payload.get("plan") or {}
+            vlm_context = payload.get("source_image_context") or {}
+            intent = plan.get("intent", user_text)
+            steps = plan.get("steps", [])
+            tools_used = [s.get("tool_name", "?") for s in steps]
+            unmet = plan.get("unmet_requirements", [])
+
+            candidates.append({
+                "signal": "negative_feedback",
+                "description": _build_feedback_spec(
+                    user_text, intent, tools_used, unmet, vlm_context
+                ),
+                "frequency": 1,
+                "session_ids": [session_id],
+                "event_id": event.get("event_id", "?"),
+                "user_text": user_text,
+                "intent": intent,
+                "tools_used": tools_used,
+                "suggested_tool_type": "opencv",
+            })
+
+    logger.info(
+        "Found %d negative-feedback event(s) across %d trajectory file(s).",
+        len(candidates), len(trajs),
+    )
+    return candidates
+
+
 def analyse_logs(
     log_dir: Path,
     window_days: int = 7,
@@ -463,6 +549,20 @@ def _cli() -> None:
         help="Register as prod directly (no human review)",
     )
 
+    # feedback
+    p_fb = sub.add_parser(
+        "feedback",
+        help="Generate tools from thumbs-down feedback in trajectory files",
+    )
+    p_fb.add_argument(
+        "--log-dir", default="./data/trajectories",
+        help="Path to trajectory JSON directory",
+    )
+    p_fb.add_argument(
+        "--auto-prod", action="store_true",
+        help="Register generated tools as prod directly (skip staging)",
+    )
+
     # run
     p_run = sub.add_parser("run", help="Run full pipeline on analysed candidates")
     p_run.add_argument(
@@ -502,6 +602,31 @@ def _cli() -> None:
             auto_name=args.name,
         )
         print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    elif args.cmd == "feedback":
+        import re
+        log_dir = Path(args.log_dir)
+        candidates = analyse_negative_feedback(log_dir)
+        if not candidates:
+            print("No negative-feedback events found in trajectories.")
+            return
+        print(f"Found {len(candidates)} unsatisfied edit(s) - generating tools...\n")
+        human_review = not args.auto_prod
+        results = []
+        for c in candidates:
+            # Name: "fb_" + sanitised intent, max 32 chars
+            raw_name = "fb_" + re.sub(r"[^a-z0-9]+", "_", c["intent"].lower())
+            auto_name = raw_name[:32].rstrip("_")
+            print(f"  Processing: [{c['event_id'][:8]}] {c['user_text'][:60]}")
+            result = process_candidate(c, human_review=human_review, auto_name=auto_name)
+            results.append(result)
+            print(f"    → {result['status']}: {result.get('message', '')}")
+        print(f"\nDone. {sum(1 for r in results if r['status'] == 'created')} tool(s) created.")
+        if human_review:
+            print("Tools registered as 'staging'. Promote with: "
+                  "python -m agents.tool_generator promote --name <tool_name>")
+        else:
+            print("Tools registered as 'prod' and will load on next server start.")
 
     elif args.cmd == "run":
         log_dir = Path(args.log_dir)
