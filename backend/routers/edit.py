@@ -1,5 +1,6 @@
 """Edit endpoint — routes user requests through the multi-agent pipeline."""
 import hashlib
+import threading
 import logging
 import traceback
 import uuid
@@ -26,6 +27,36 @@ router = APIRouter(prefix="/api/edit", tags=["edit"])
 MAX_HISTORY = 50
 
 _orchestrator = OrchestratorAgent()
+
+
+def _run_memory_index(session_id: str, event_id: str, user_text: str,
+                      vlm_context: dict, plan: dict) -> None:
+    try:
+        from agents.memory_agent import MemoryAgent
+        MemoryAgent().index_success(
+            event_id=event_id,
+            session_id=session_id,
+            user_text=user_text,
+            vlm_context=vlm_context,
+            plan=plan,
+            satisfaction_score=0.5,  # neutral default; updated when feedback arrives
+        )
+        logger.info("Auto-indexed edit event=%s", event_id)
+    except Exception as exc:
+        logger.warning("Auto memory index failed event=%s: %s", event_id, exc)
+
+
+def _schedule_memory_index(session_id: str, event_id: str, user_text: str,
+                            vlm_context: dict, plan: dict) -> None:
+    try:
+        t = threading.Thread(
+            target=_run_memory_index,
+            args=(session_id, event_id, user_text, vlm_context, plan),
+            daemon=True,
+        )
+        t.start()
+    except Exception as exc:
+        logger.warning("Could not schedule memory index: %s", exc)
 
 
 def _image_hash(b64: str) -> str:
@@ -55,6 +86,9 @@ async def _edit_image(session_id: str, req: EditRequest):
     if not user_text:
         raise HTTPException(status_code=400, detail="user_text is empty")
 
+    # Use provided image as source (viewer-driven edit), else use session's latest
+    source_image = req.input_image_b64 or session.current_image_b64
+
     session.chat_history.append(ChatMessage(role="user", content=user_text))
     append_event(
         session.trajectory,
@@ -65,6 +99,7 @@ async def _edit_image(session_id: str, req: EditRequest):
     )
 
     result_b64: str | None = None
+    edit_event_id: str | None = None
     intent: str = "agent"
     engine: str | None = "agent"
     operation: str | None = None
@@ -77,6 +112,9 @@ async def _edit_image(session_id: str, req: EditRequest):
     validator_attempts: int | None = None
     quality_verdict: dict | None = None
     step_logs: list | None = None
+    source_image_context: dict | None = None
+    is_correction: bool | None = None
+    timing_ms: dict | None = None
 
     # --- Session actions (undo / reset) ---
     lower = user_text.lower()
@@ -90,7 +128,6 @@ async def _edit_image(session_id: str, req: EditRequest):
         else:
             response_text = "되돌릴 편집 이력이 없습니다."
         result_b64 = session.current_image_b64
-        # Let orchestrator know the image changed so next edit starts fresh
         _orchestrator.reset_session(session_id)
 
     elif any(kw in lower for kw in ("reset", "초기화", "원본으로", "처음으로")):
@@ -106,7 +143,7 @@ async def _edit_image(session_id: str, req: EditRequest):
     else:
         agent_result = _orchestrator.process_edit(
             prompt=user_text,
-            image_b64=session.current_image_b64,
+            image_b64=source_image,
             session_id=session_id,
         )
 
@@ -121,6 +158,9 @@ async def _edit_image(session_id: str, req: EditRequest):
         validator_attempts = agent_result.get("validator_attempts")
         quality_verdict = agent_result.get("quality_verdict")
         step_logs = agent_result.get("step_logs")
+        source_image_context = agent_result.get("source_image_context")
+        is_correction = agent_result.get("is_correction")
+        timing_ms = agent_result.get("timing_ms")
 
         steps = executed_plan.get("steps", [])
         if steps:
@@ -152,32 +192,45 @@ async def _edit_image(session_id: str, req: EditRequest):
 
     session.chat_history.append(ChatMessage(role="assistant", content=response_text))
 
-    append_event(
-        session.trajectory,
-        TrajectoryEvent(
-            type="edit_applied",
-            payload=TrajectoryEventPayload(
-                user_text=user_text,
-                intent_classified=intent,
-                engine_used=engine,
-                params=params,
-                result_image_hash=_image_hash(result_b64) if result_b64 else None,
-                image_url=result_url,
-                latency_ms=latency_ms,
-                error=error_msg,
-                plan=plan,
-                validator_verdict=validator_verdict,
-                validator_attempts=validator_attempts,
-                quality_verdict=quality_verdict,
-                orchestrator_step_logs=step_logs,
-            ),
+    edit_event = TrajectoryEvent(
+        type="edit_applied",
+        payload=TrajectoryEventPayload(
+            user_text=user_text,
+            intent_classified=intent,
+            engine_used=engine,
+            params=params,
+            result_image_hash=_image_hash(result_b64) if result_b64 else None,
+            image_url=result_url,
+            latency_ms=latency_ms,
+            error=error_msg,
+            plan=plan,
+            validator_verdict=validator_verdict,
+            validator_attempts=validator_attempts,
+            quality_verdict=quality_verdict,
+            orchestrator_step_logs=step_logs,
+            source_image_context=source_image_context,
+            is_correction=is_correction,
+            timing_ms=timing_ms,
         ),
     )
+    edit_event_id = edit_event.event_id
+    append_event(session.trajectory, edit_event)
+
+    # Auto-index every successful edit in Memory Agent (non-blocking)
+    if image_changed and not error_msg and plan:
+        _schedule_memory_index(
+            session_id=session_id,
+            event_id=edit_event_id,
+            user_text=user_text,
+            vlm_context=source_image_context or {},
+            plan=plan,
+        )
 
     store.set_session(session_id, session)
 
     return EditResponse(
         session_id=session_id,
+        event_id=edit_event_id,
         result_image_b64=result_b64,
         chat_message=response_text,
         intent=intent,
@@ -185,4 +238,5 @@ async def _edit_image(session_id: str, req: EditRequest):
         operation=operation,
         params=params,
         latency_ms=latency_ms,
+        timing_ms=timing_ms,
     )

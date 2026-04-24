@@ -19,8 +19,8 @@ from models.schemas import (
     TrajectoryEventPayload,
 )
 import store
-from services.trajectory_store import append_event, save_trajectory
-from services import image_store
+from services.trajectory_store import append_event, save_trajectory, load_trajectory
+from services import image_store, gemini_editor
 
 router = APIRouter(prefix="/api/session", tags=["session"])
 
@@ -89,6 +89,323 @@ async def create_session(
     store.set_session(session_id, session)
 
     # Record upload event
+    event = TrajectoryEvent(
+        type="image_upload",
+        payload=TrajectoryEventPayload(
+            filename=filename,
+            size_bytes=len(raw),
+            width=w,
+            height=h,
+            image_url=original_url,
+        ),
+    )
+    append_event(trajectory, event)
+
+    return SessionCreateResponse(
+        session_id=session_id,
+        created_at=now,
+        original_image_b64=b64,
+        width=w,
+        height=h,
+        filename=filename,
+    )
+
+
+@router.post("/generate", response_model=SessionCreateResponse)
+async def generate_session(
+    prompt: str = Form(...),
+    user_nickname: str = Form(...),
+):
+    """Generate an image from text and start a new session."""
+    b64, err_msg = gemini_editor.generate_image(prompt)
+    if not b64:
+        raise HTTPException(status_code=500, detail=err_msg or "이미지 생성 실패. 다시 시도해주세요.")
+
+    # Decode generated image to get dimensions
+    import numpy as np
+    import cv2
+    img_data = base64.b64decode(b64)
+    arr = np.frombuffer(img_data, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=500, detail="생성된 이미지를 처리할 수 없습니다.")
+    h, w = img.shape[:2]
+    _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    b64 = base64.b64encode(buf).decode("utf-8")
+
+    session_id = str(uuid.uuid4())
+    now = datetime.utcnow()
+    filename = f"generated_{session_id[:8]}.jpg"
+
+    original_url = image_store.upload_image(b64, f"{session_id}/original")
+
+    img_info = OriginalImageInfo(
+        filename=filename,
+        size_bytes=len(buf),
+        width=w,
+        height=h,
+        mime_type="image/jpeg",
+    )
+    trajectory = Trajectory(
+        session_id=session_id,
+        user_nickname=user_nickname,
+        created_at=now,
+        updated_at=now,
+        original_image=img_info,
+    )
+    session = SessionState(
+        session_id=session_id,
+        user_nickname=user_nickname,
+        created_at=now,
+        current_image_b64=b64,
+        edit_history=[b64],
+        trajectory=trajectory,
+        original_filename=filename,
+    )
+    store.set_session(session_id, session)
+
+    event = TrajectoryEvent(
+        type="image_upload",
+        payload=TrajectoryEventPayload(
+            filename=filename,
+            size_bytes=len(buf),
+            width=w,
+            height=h,
+            image_url=original_url,
+            user_text=prompt,
+        ),
+    )
+    append_event(trajectory, event)
+
+    return SessionCreateResponse(
+        session_id=session_id,
+        created_at=now,
+        original_image_b64=b64,
+        width=w,
+        height=h,
+        filename=filename,
+    )
+
+
+def _truncate_events_to_step(events: list, step_idx: int) -> list:
+    """Keep only trajectory events up to step_idx.
+    step_idx=0 → original image only; step_idx=N → N edits applied."""
+    result = []
+    completed_pairs = 0
+    for ev in events:
+        ev_type = ev.type
+        if ev_type == "image_upload":
+            result.append(ev)
+        elif ev_type == "chat_input":
+            if completed_pairs < step_idx:
+                result.append(ev)
+        elif ev_type == "edit_applied":
+            if completed_pairs < step_idx:
+                result.append(ev)
+                completed_pairs += 1
+        # skip image_saved / undo / session_end — not needed when restoring
+    return result
+
+
+@router.post("/restore/{session_id}", response_model=SessionCreateResponse)
+async def restore_session(
+    session_id: str,
+    image_url: str = Form(...),
+    user_nickname: str = Form(...),
+    step_idx: int = Form(...),
+):
+    """Restore an existing session at a specific step for continued editing.
+    The trajectory is truncated to that step and re-saved so the new edit
+    appends to the original session rather than creating a new one."""
+    # Load trajectory from persistent storage (fall back to in-memory)
+    from services.trajectory_store import save_trajectory as _save_traj
+    traj = load_trajectory(session_id)
+    if not traj:
+        existing = store.get_session(session_id)
+        if existing and existing.trajectory:
+            traj = existing.trajectory
+        else:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+    # Download image at the selected step
+    import httpx as _httpx
+    try:
+        async with _httpx.AsyncClient() as client:
+            resp = await client.get(image_url, follow_redirects=True, timeout=15.0)
+            resp.raise_for_status()
+        raw = resp.content
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch image: {exc}")
+
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Image too large (max 10 MB)")
+
+    try:
+        b64, w, h = _decode_upload(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # Truncate events to the chosen step and persist
+    traj.events = _truncate_events_to_step(traj.events, step_idx)
+    _save_traj(traj)
+
+    # Restore session in memory under the ORIGINAL session_id
+    filename = traj.original_image.filename if traj.original_image else "restored.jpg"
+    session = SessionState(
+        session_id=session_id,
+        user_nickname=user_nickname,
+        created_at=traj.created_at,
+        current_image_b64=b64,
+        edit_history=[b64],
+        trajectory=traj,
+        original_filename=filename,
+    )
+    store.set_session(session_id, session)
+
+    return SessionCreateResponse(
+        session_id=session_id,
+        created_at=traj.created_at,
+        original_image_b64=b64,
+        width=w,
+        height=h,
+        filename=filename,
+    )
+
+
+@router.post("/resume-edit/{session_id}")
+async def resume_and_edit(
+    session_id: str,
+    image_url: str = Form(...),
+    user_nickname: str = Form(...),
+    step_idx: int = Form(...),
+    user_text: str = Form(...),
+):
+    """Restore an existing session at a specific step AND apply one edit atomically.
+    Combining restore + edit into a single request eliminates any inter-request
+    timing issues (e.g. session not found in memory between two calls)."""
+    from services.trajectory_store import save_trajectory as _save_traj
+
+    # 1. Load trajectory
+    traj = load_trajectory(session_id)
+    if not traj:
+        existing = store.get_session(session_id)
+        if existing and existing.trajectory:
+            traj = existing.trajectory
+        else:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+    # 2. Download image at the selected step
+    import httpx as _httpx
+    try:
+        async with _httpx.AsyncClient() as client:
+            resp = await client.get(image_url, follow_redirects=True, timeout=15.0)
+            resp.raise_for_status()
+        raw = resp.content
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch image: {exc}")
+
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Image too large (max 10 MB)")
+
+    try:
+        b64, w, h = _decode_upload(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # 3. Truncate trajectory to selected step and persist
+    traj.events = _truncate_events_to_step(traj.events, step_idx)
+    _save_traj(traj)
+
+    # 4. Set up session in memory
+    filename = traj.original_image.filename if traj.original_image else "restored.jpg"
+    session_obj = SessionState(
+        session_id=session_id,
+        user_nickname=user_nickname,
+        created_at=traj.created_at,
+        current_image_b64=b64,
+        edit_history=[b64],
+        trajectory=traj,
+        original_filename=filename,
+    )
+    store.set_session(session_id, session_obj)
+
+    # 5. Run the edit inline (same logic as edit.py, avoids cross-request session lookup)
+    from routers.edit import _edit_image
+    from models.schemas import EditRequest
+    req = EditRequest(user_text=user_text)
+    edit_result = await _edit_image(session_id, req)
+
+    return {
+        "session_id": session_id,
+        "original_image_b64": b64,
+        "created_at": traj.created_at.isoformat(),
+        "width": w,
+        "height": h,
+        "filename": filename,
+        "result_image_b64": edit_result.result_image_b64,
+        "chat_message": edit_result.chat_message,
+        "intent": edit_result.intent,
+        "engine": edit_result.engine,
+        "operation": edit_result.operation,
+        "params": edit_result.params,
+        "latency_ms": edit_result.latency_ms,
+    }
+
+
+@router.post("/resume", response_model=SessionCreateResponse)
+async def resume_session(
+    image_url: str = Form(...),
+    user_nickname: str = Form(...),
+):
+    """Create a new session by resuming from an existing image URL."""
+    import httpx as _httpx
+    try:
+        async with _httpx.AsyncClient() as client:
+            resp = await client.get(image_url, follow_redirects=True, timeout=15.0)
+            resp.raise_for_status()
+        raw = resp.content
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch image: {exc}")
+
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Image too large (max 10 MB)")
+
+    try:
+        b64, w, h = _decode_upload(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    session_id = str(uuid.uuid4())
+    now = datetime.utcnow()
+    filename = f"resumed_{session_id[:8]}.jpg"
+
+    original_url = image_store.upload_image(b64, f"{session_id}/original")
+
+    img_info = OriginalImageInfo(
+        filename=filename,
+        size_bytes=len(raw),
+        width=w,
+        height=h,
+        mime_type="image/jpeg",
+    )
+    trajectory = Trajectory(
+        session_id=session_id,
+        user_nickname=user_nickname,
+        created_at=now,
+        updated_at=now,
+        original_image=img_info,
+    )
+    session = SessionState(
+        session_id=session_id,
+        user_nickname=user_nickname,
+        created_at=now,
+        current_image_b64=b64,
+        edit_history=[b64],
+        trajectory=trajectory,
+        original_filename=filename,
+    )
+    store.set_session(session_id, session)
+
     event = TrajectoryEvent(
         type="image_upload",
         payload=TrajectoryEventPayload(

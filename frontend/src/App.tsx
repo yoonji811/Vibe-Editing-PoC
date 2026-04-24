@@ -1,26 +1,177 @@
-import { useState } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { useSession } from './hooks/useSession'
-import ImageUploader from './components/ImageUploader'
 import ImageViewer from './components/ImageViewer'
 import ChatPanel from './components/ChatPanel'
-import HistoryBar from './components/HistoryBar'
+import HistoryBar, { type EditStep } from './components/HistoryBar'
+import * as api from './api/client'
+
+type FeedbackState = 'none' | 'up' | 'down'
+
+interface PastView {
+  sessionId: string
+  steps: EditStep[]
+  idx: number
+}
 
 export default function App() {
   const session = useSession()
   const [historyIndex, setHistoryIndex] = useState(0)
   const [nicknameInput, setNicknameInput] = useState('')
   const [nickname, setNickname] = useState<string | null>(null)
+  const [isEditingNickname, setIsEditingNickname] = useState(false)
+  const [nicknameEditInput, setNicknameEditInput] = useState('')
+  const [sessions, setSessions] = useState<api.SessionSummary[]>([])
+  const [showScrollHint, setShowScrollHint] = useState(false)
+  const [isHoldingOriginal, setIsHoldingOriginal] = useState(false)
+  const [pastView, setPastView] = useState<PastView | null>(null)
+  const [preInput, setPreInput] = useState('')
+  const [feedbackMap, setFeedbackMap] = useState<Record<string, FeedbackState>>({})
 
-  const displayImage =
-    historyIndex < session.history.length
-      ? session.history[historyIndex].imageB64
-      : session.currentImageB64
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const mainRef = useRef<HTMLElement>(null)
+  const historyLengthRef = useRef(0)
+  const prevHistoryLenRef = useRef(0)
+  const pastViewRef = useRef<PastView | null>(null)
 
-  const handleHistorySelect = (index: number) => setHistoryIndex(index)
+  // Keep refs in sync
+  useEffect(() => { historyLengthRef.current = session.history.length }, [session.history.length])
+  useEffect(() => { pastViewRef.current = pastView }, [pastView])
+
+  // Fetch sessions by nickname
+  const fetchSessions = useCallback(async (nick: string) => {
+    const data = await api.getSessionsByNickname(nick)
+    setSessions(data)
+  }, [])
+
+  useEffect(() => {
+    if (nickname) fetchSessions(nickname)
+  }, [nickname, fetchSessions])
+
+  // Re-fetch after session ends
+  useEffect(() => {
+    if (!session.sessionId && nickname) fetchSessions(nickname)
+  }, [session.sessionId, nickname, fetchSessions])
+
+  // When new edit result arrives: show scroll hint, clear pastView, jump to latest
+  useEffect(() => {
+    const len = session.history.length
+    if (len > prevHistoryLenRef.current) {
+      if (len > 1) {
+        setShowScrollHint(true)
+        const t = setTimeout(() => setShowScrollHint(false), 2500)
+        prevHistoryLenRef.current = len
+        setPastView(null)
+        setHistoryIndex(len - 1)
+        return () => clearTimeout(t)
+      }
+      prevHistoryLenRef.current = len
+    }
+  }, [session.history.length])
+
+  // Wheel event: navigate history or past view.
+  // Attached to window (not mainRef) because mainRef doesn't exist at mount time
+  // (user starts on the login screen). At event time mainRef is already set,
+  // so we use it to scope the handler to the image area only.
+  useEffect(() => {
+    const handleWheel = (e: WheelEvent) => {
+      const mainEl = mainRef.current
+      if (!mainEl || !mainEl.contains(e.target as Node)) return
+
+      const pv = pastViewRef.current
+      if (pv) {
+        if (pv.steps.length <= 1) return
+        e.preventDefault()
+        setPastView(prev => {
+          if (!prev) return prev
+          const newIdx = e.deltaY < 0
+            ? Math.max(0, prev.idx - 1)
+            : Math.min(prev.steps.length - 1, prev.idx + 1)
+          return newIdx === prev.idx ? prev : { ...prev, idx: newIdx }
+        })
+      } else if (historyLengthRef.current > 1) {
+        e.preventDefault()
+        setHistoryIndex(prev => {
+          if (e.deltaY < 0) return Math.max(0, prev - 1)
+          return Math.min(historyLengthRef.current - 1, prev + 1)
+        })
+      }
+    }
+
+    window.addEventListener('wheel', handleWheel, { passive: false })
+    return () => window.removeEventListener('wheel', handleWheel)
+  }, []) // attach once to window; state and refs accessed at event time
+
+  // Compute image source (data URI or Cloudinary URL)
+  const displayImageSrc = (() => {
+    const toB64Src = (b64: string | null | undefined) =>
+      b64 ? `data:image/jpeg;base64,${b64}` : null
+    const entryToSrc = (entry: { imageB64?: string; imageUrl?: string } | null | undefined) => {
+      if (!entry) return null
+      return entry.imageUrl ?? toB64Src(entry.imageB64)
+    }
+
+    if (isHoldingOriginal) {
+      if (pastView?.steps[0]?.imageUrl) return pastView.steps[0].imageUrl
+      return entryToSrc(session.history[0])
+    }
+    if (pastView) {
+      return pastView.steps[pastView.idx]?.imageUrl || null
+    }
+    if (session.sessionId) {
+      if (historyIndex < session.history.length) {
+        return entryToSrc(session.history[historyIndex])
+      }
+      return toB64Src(session.currentImageB64)
+    }
+    return null
+  })()
+
+  const handleFeedback = async (action: api.FeedbackAction) => {
+    if (!session.sessionId) return
+    const entry = session.history[historyIndex]
+    if (!entry?.eventId) return
+    const key = entry.eventId
+    if (feedbackMap[key] && feedbackMap[key] !== 'none') return // already given
+    setFeedbackMap(prev => ({ ...prev, [key]: action === 'thumbs_up' ? 'up' : 'down' }))
+    try {
+      await api.sendFeedback(session.sessionId, key, action)
+    } catch {
+      setFeedbackMap(prev => ({ ...prev, [key]: 'none' }))
+    }
+  }
+
+  const handleHistorySelect = (index: number) => {
+    setPastView(null)
+    setHistoryIndex(index)
+  }
+
+  const handlePastStepSelect = (sessionId: string, steps: EditStep[], idx: number) => {
+    setPastView({ sessionId, steps, idx })
+  }
 
   const handleSend = async (text: string) => {
-    await session.sendMessage(text)
-    setHistoryIndex(session.history.length)
+    if (pastView) {
+      // Resume from the selected past step image, then apply the edit
+      const imageUrl = pastView.steps[pastView.idx]?.imageUrl
+        ?? pastView.steps[0]?.imageUrl
+      if (imageUrl && nickname) {
+        const { sessionId: origId, steps, idx } = pastView
+        setPastView(null)
+        await session.resumeAndSend(origId, imageUrl, text, nickname, steps, idx)
+        // Explicitly refresh session list so the restored session appears
+        await fetchSessions(nickname)
+      }
+      return
+    }
+
+    // If the user is viewing an older step, pass that image as the edit source
+    const latestIdx = session.history.length - 1
+    const inputB64 = historyIndex < latestIdx
+      ? session.history[historyIndex]?.imageB64
+      : undefined
+
+    await session.sendMessage(text, inputB64)
+    // historyIndex updated by the useEffect watching session.history.length
   }
 
   const handleNicknameSubmit = (e: React.FormEvent) => {
@@ -29,28 +180,100 @@ export default function App() {
     if (trimmed) setNickname(trimmed)
   }
 
-  const handleUpload = async (file: File) => {
-    if (!nickname) return
-    await session.uploadImage(file, nickname)
+  // Title click → reset session, keep nickname
+  const handleTitleClick = async () => {
+    if (!session.sessionId && !pastView) return
+    // Force-save trajectory before clearing state so the session appears in the list
+    if (session.sessionId) {
+      try { await api.endSession(session.sessionId) } catch { /* non-fatal */ }
+    }
+    session.resetSession()
+    setPastView(null)
+    setPreInput('')
+    setHistoryIndex(0)
+    setIsHoldingOriginal(false)
+    if (nickname) await fetchSessions(nickname)
   }
 
-  const handleReset = () => {
+  // Nickname inline edit
+  const handleNicknameClick = () => {
+    setNicknameEditInput(nickname ?? '')
+    setIsEditingNickname(true)
+  }
+
+  const commitNicknameEdit = () => {
+    const trimmed = nicknameEditInput.trim()
+    if (trimmed && trimmed !== nickname) {
+      session.resetSession()
+      setPastView(null)
+      setNickname(trimmed)
+      setPreInput('')
+      setHistoryIndex(0)
+      setSessions([])
+    }
+    setIsEditingNickname(false)
+  }
+
+  const handleNewImage = async () => {
+    // Force-save trajectory before clearing state so the session appears in the list
+    if (session.sessionId) {
+      try { await api.endSession(session.sessionId) } catch { /* non-fatal */ }
+    }
     session.resetSession()
-    setNickname(null)
-    setNicknameInput('')
+    setPastView(null)
+    setPreInput('')
+    setHistoryIndex(0)
+    setIsHoldingOriginal(false)
+    if (nickname) await fetchSessions(nickname)
+  }
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file || !nickname) return
+    e.target.value = ''
+    await session.uploadImage(file, nickname)
     setHistoryIndex(0)
   }
 
-  // Step 1: Nickname input
+  const handlePreSubmit = async () => {
+    if (!nickname || session.isLoading || !preInput.trim()) return
+    if (pastView) {
+      // Resume from selected past step, using the input text as the first edit
+      const imageUrl = pastView.steps[pastView.idx]?.imageUrl
+        ?? pastView.steps[0]?.imageUrl
+      if (imageUrl) {
+        const { sessionId: origId, steps, idx } = pastView
+        setPastView(null)
+        await session.resumeAndSend(origId, imageUrl, preInput.trim(), nickname, steps, idx)
+        await fetchSessions(nickname)
+        setPreInput('')
+        setHistoryIndex(0)
+        return
+      }
+    }
+    await session.generateFromText(preInput.trim(), nickname)
+    setPreInput('')
+    setHistoryIndex(0)
+  }
+
+  const handlePreKey = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handlePreSubmit()
+    }
+  }
+
+  const showImage = !!(session.sessionId || pastView) && !!displayImageSrc
+
+  // ── Nickname input screen ──────────────────────────────────────────────────
   if (!nickname) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <form onSubmit={handleNicknameSubmit} className="bg-white rounded-2xl shadow-sm border border-gray-200 p-10 flex flex-col items-center gap-6 w-full max-w-sm">
-          <div className="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center">
-            <svg className="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-            </svg>
-          </div>
+      <div className="h-screen overflow-hidden bg-gray-50 flex items-center justify-center">
+        <form
+          onSubmit={handleNicknameSubmit}
+          className="bg-white rounded-2xl shadow-sm border border-gray-200 p-10 flex flex-col items-center gap-6 w-full max-w-sm"
+        >
+          <img src="/vibe_logo.png" alt="Vibe Editor" className="w-24 h-24 object-contain" />
           <div className="text-center">
             <h1 className="text-xl font-bold text-gray-900">Vibe Editor</h1>
             <p className="text-sm text-gray-500 mt-1">닉네임을 입력하고 시작하세요</p>
@@ -71,19 +294,52 @@ export default function App() {
           >
             시작하기
           </button>
+          <p className="text-[11px] text-gray-400 text-center">
+            Your edits and images are stored on the server.
+          </p>
         </form>
       </div>
     )
   }
 
+  // ── Main UI ───────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col font-sans">
+    <div className="h-screen overflow-hidden bg-gray-50 flex flex-col font-sans">
       {/* Header */}
       <header className="bg-white border-b border-gray-200 flex items-center px-6 py-3 shrink-0">
-        <span className="text-lg font-bold text-gray-900 tracking-tight">Vibe Editor</span>
+        <button
+          onClick={handleTitleClick}
+          disabled={session.isLoading}
+          className="flex items-center gap-2 hover:opacity-80 transition-opacity disabled:opacity-50"
+          title="처음으로"
+        >
+          <img src="/vibe_logo.png" alt="" className="h-8 w-auto object-contain" />
+          <span className="text-lg font-bold text-gray-900 tracking-tight">Vibe Editor</span>
+        </button>
+
         <div className="flex-1 flex justify-center">
-          <span className="text-xs font-semibold tracking-widest text-blue-600 uppercase">{nickname}</span>
+          {isEditingNickname ? (
+            <form onSubmit={(e) => { e.preventDefault(); commitNicknameEdit() }}>
+              <input
+                value={nicknameEditInput}
+                onChange={e => setNicknameEditInput(e.target.value)}
+                onBlur={commitNicknameEdit}
+                autoFocus
+                maxLength={30}
+                className="text-xs font-semibold tracking-widest text-blue-600 uppercase border-b border-blue-400 bg-transparent outline-none text-center w-32"
+              />
+            </form>
+          ) : (
+            <button
+              onClick={handleNicknameClick}
+              className="text-xs font-semibold tracking-widest text-blue-600 uppercase hover:underline underline-offset-2"
+              title="클릭하여 닉네임 변경"
+            >
+              {nickname}
+            </button>
+          )}
         </div>
+
         {session.sessionId && (
           <button
             onClick={session.saveImage}
@@ -96,46 +352,142 @@ export default function App() {
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Left sidebar */}
-        <aside className="hidden md:flex w-44 shrink-0 flex-col border-r border-gray-200 bg-gray-50 overflow-y-auto">
-          {session.sessionId ? (
-            <HistoryBar
-              history={session.history}
-              currentIndex={historyIndex}
-              onSelect={handleHistorySelect}
-              onNewImage={handleReset}
-            />
-          ) : (
-            <div className="px-4 pt-5">
-              <p className="text-xs font-bold text-gray-800 uppercase tracking-widest">Recent States</p>
-              <p className="text-xs text-gray-400 mt-0.5">Edit Timeline</p>
-            </div>
-          )}
+        <aside className="hidden md:flex w-52 shrink-0 flex-col border-r border-gray-200 bg-gray-50 overflow-y-auto">
+          <HistoryBar
+            sessions={sessions}
+            history={session.history}
+            currentIndex={historyIndex}
+            currentSessionId={session.sessionId}
+            activePastSessionId={pastView?.sessionId}
+            activePastStepIdx={pastView?.idx}
+            isLoading={session.isLoading}
+            onSelect={handleHistorySelect}
+            onPastStepSelect={handlePastStepSelect}
+            onNewImage={handleNewImage}
+          />
         </aside>
 
         {/* Main column */}
         <div className="flex flex-1 flex-col min-h-0 min-w-0">
           {/* Image area */}
-          <main className="flex-1 flex items-center justify-center p-6 min-h-0 overflow-hidden">
-            {session.sessionId && displayImage ? (
-              <ImageViewer imageB64={displayImage} />
+          <main
+            ref={mainRef}
+            className="flex flex-col items-center justify-center p-4 overflow-hidden shrink-0"
+            style={{ height: '78vh' }}
+          >
+            {showImage ? (
+              <>
+                <ImageViewer
+                  imageSrc={displayImageSrc!}
+                  isLoading={session.isLoading}
+                  showScrollHint={showScrollHint && !isHoldingOriginal && !pastView}
+                  onMouseDown={() => setIsHoldingOriginal(true)}
+                  onMouseUp={() => setIsHoldingOriginal(false)}
+                  onMouseLeave={() => setIsHoldingOriginal(false)}
+                />
+                {/* Feedback buttons — show when viewing an edit (index > 0, has eventId) */}
+                {!pastView && !session.isLoading && historyIndex > 0 && session.history[historyIndex]?.eventId && (() => {
+                  const eventId = session.history[historyIndex].eventId!
+                  const fb = feedbackMap[eventId] ?? 'none'
+                  return (
+                    <div className="flex items-center gap-2 mt-2">
+                      <button
+                        onClick={() => handleFeedback('thumbs_up')}
+                        disabled={fb !== 'none'}
+                        title="만족"
+                        className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors text-base
+                          ${fb === 'up' ? 'bg-green-100 text-green-600' : 'bg-gray-100 hover:bg-green-50 text-gray-400 hover:text-green-500 disabled:opacity-40'}`}
+                      >
+                        👍
+                      </button>
+                      <button
+                        onClick={() => handleFeedback('thumbs_down')}
+                        disabled={fb !== 'none'}
+                        title="불만족"
+                        className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors text-base
+                          ${fb === 'down' ? 'bg-red-100 text-red-500' : 'bg-gray-100 hover:bg-red-50 text-gray-400 hover:text-red-400 disabled:opacity-40'}`}
+                      >
+                        👎
+                      </button>
+                    </div>
+                  )
+                })()}
+              </>
+            ) : session.isLoading ? (
+              <div className="flex flex-col items-center gap-4">
+                <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                <p className="text-gray-500 text-sm">처리 중...</p>
+              </div>
+            ) : pastView ? (
+              <div className="flex flex-col items-center gap-3 text-center select-none pointer-events-none">
+                <div className="w-16 h-16 bg-gray-100 rounded-2xl flex items-center justify-center">
+                  <svg className="w-8 h-8 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
+                </div>
+                <p className="text-sm text-gray-400">이미지를 불러올 수 없습니다</p>
+                <p className="text-xs text-gray-300">이전 버전에서 생성된 세션은 이미지가 저장되지 않았습니다</p>
+              </div>
             ) : (
-              <ImageUploader onUpload={handleUpload} isLoading={session.isLoading} />
+              <div className="flex flex-col items-center gap-3 text-center select-none pointer-events-none">
+                <div className="w-16 h-16 bg-gray-100 rounded-2xl flex items-center justify-center">
+                  <svg className="w-8 h-8 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
+                </div>
+                <p className="text-sm text-gray-400">이미지를 업로드하거나 텍스트로 생성하세요</p>
+              </div>
             )}
           </main>
 
-          {/* Instruction input — always visible when session active */}
-          {session.sessionId && (
+          {/* Input panel */}
+          {session.sessionId ? (
             <ChatPanel
               isLoading={session.isLoading}
               onSend={handleSend}
               onSave={session.saveImage}
               error={session.error}
             />
-          )}
-
-          {/* Upload error */}
-          {!session.sessionId && session.error && (
-            <p className="text-center text-red-500 text-sm pb-4">{session.error}</p>
+          ) : (
+            <div className="bg-white border-t border-gray-200 px-6 py-4 shrink-0">
+              {session.error && <p className="text-red-500 text-xs mb-2 text-center">{session.error}</p>}
+              <div className={`flex items-center gap-3 bg-gray-50 border rounded-full px-4 py-2.5 transition-colors ${
+                session.isLoading ? 'border-gray-200 opacity-70' : 'border-gray-200 hover:border-gray-300 focus-within:border-blue-300'
+              }`}>
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={session.isLoading}
+                  className="text-gray-400 hover:text-gray-600 shrink-0 disabled:opacity-40"
+                  title="이미지 업로드"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
+                </button>
+                <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
+                <input
+                  value={preInput}
+                  onChange={(e) => setPreInput(e.target.value)}
+                  onKeyDown={handlePreKey}
+                  placeholder={pastView ? "이 시점부터 편집을 계속하세요..." : "이미지를 업로드하거나 원하는 이미지를 설명하세요..."}
+                  disabled={session.isLoading}
+                  className="flex-1 bg-transparent text-sm text-gray-700 placeholder-gray-400 outline-none"
+                />
+                <button
+                  onClick={handlePreSubmit}
+                  disabled={session.isLoading || !preInput.trim()}
+                  className="w-9 h-9 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-300 text-white rounded-full flex items-center justify-center transition-colors shrink-0"
+                >
+                  {session.isLoading ? (
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14m-7-7 7 7-7 7" />
+                    </svg>
+                  )}
+                </button>
+              </div>
+            </div>
           )}
         </div>
       </div>

@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
 
-from routers import session, edit, trajectory
+from routers import session, edit, trajectory, feedback
 from agents.router import router as agent_router
 
 app = FastAPI(title="AI Image Editor", version="0.1.0")
@@ -36,6 +36,7 @@ app.add_middleware(
 app.include_router(session.router)
 app.include_router(edit.router)
 app.include_router(trajectory.router)
+app.include_router(feedback.router)
 app.include_router(agent_router)
 
 
@@ -59,7 +60,11 @@ async def catch_exceptions(request: Request, call_next):
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    from services import image_store
+    return {
+        "status": "ok",
+        "cloudinary": "configured" if image_store._configured else "not configured",
+    }
 
 
 # ---------------------------------------------------------------------------
