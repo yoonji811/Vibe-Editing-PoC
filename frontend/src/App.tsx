@@ -372,8 +372,7 @@ export default function App() {
           {/* Image area */}
           <main
             ref={mainRef}
-            className="flex flex-col items-center justify-center p-4 overflow-hidden shrink-0"
-            style={{ height: '78vh' }}
+            className="flex flex-col items-center justify-center p-4 overflow-hidden flex-1 min-h-0"
           >
             {showImage ? (
               <>
