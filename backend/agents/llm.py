@@ -112,7 +112,7 @@ def call_llm_vision_json(
         ))
     parts.append(prompt)
 
-    gemini_model = _get_model(model, system, temperature, json_mode=True)
+    gemini_model = _get_model(model, system, temperature, json_mode=False)
     response = gemini_model.generate_content(parts)
     text = response.text.strip()
     # Extract JSON block if wrapped in markdown fences

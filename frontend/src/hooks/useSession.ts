@@ -112,6 +112,7 @@ export function useSession(): SessionHook {
         if (res.result_image_b64) {
           setCurrentImageB64(res.result_image_b64)
           setRecommendations([])
+          fetchRecommendations(sessionId)
           const label = res.operation ?? res.intent ?? '편집'
           setHistory((prev) => [
             ...prev,
@@ -130,7 +131,7 @@ export function useSession(): SessionHook {
         setIsLoading(false)
       }
     },
-    [sessionId]
+    [sessionId, fetchRecommendations]
   )
 
   const resumeAndSend = useCallback(async (
