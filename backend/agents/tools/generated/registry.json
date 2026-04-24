@@ -1,0 +1,53 @@
+[
+  {
+    "name": "fb_apply_a_dreamy_pastel_color_g",
+    "version": "1.0.0",
+    "type": "opencv",
+    "module_path": "tools/generated/fb_apply_a_dreamy_pastel_color_g_v1.py",
+    "description": "Applies a dreamy pastel color grade by lifting shadows, softening contrast, reducing saturation, and adding a soft glow with pink and blue color tints.",
+    "params_schema": {
+      "type": "object",
+      "properties": {
+        "intensity": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "default": 0.5,
+          "description": "Overall strength of the dreamy pastel effect."
+        },
+        "glow_strength": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "default": 0.4,
+          "description": "Intensity of the soft diffusion/glow effect."
+        },
+        "pink_tint": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "default": 0.3,
+          "description": "Strength of the pink highlight tint."
+        },
+        "blue_tint": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "default": 0.2,
+          "description": "Strength of the blue shadow tint."
+        }
+      }
+    },
+    "status": "prod",
+    "version_hash": "sha256:8ba91500886a18fa",
+    "created_by": "tool_generator",
+    "created_at": "2026-04-24T02:57:40Z",
+    "analysis_evidence": {
+      "trigger_signal": "negative_feedback",
+      "session_ids": [
+        "f0109c99-c08e-4e40-bd99-bc3e9835de3e"
+      ],
+      "frequency": 1
+    }
+  }
+]
