@@ -7,20 +7,41 @@ generation parameters outside of here.
 from __future__ import annotations
 
 import base64
-import io
 import json
 import os
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import google.generativeai as genai
-import PIL.Image
 from dotenv import load_dotenv
 
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY", ""))
 
-_DEFAULT_MODEL = "gemini-2.5-flash"
+_DEFAULT_MODEL = "gemini-3-flash-preview"
+
+# Cache GenerativeModel instances keyed by (model, system, temperature, json_mode)
+# to avoid re-instantiation overhead on every request.
+_model_cache: Dict[Tuple, genai.GenerativeModel] = {}
+
+
+def _get_model(
+    model: str,
+    system: Optional[str],
+    temperature: float,
+    json_mode: bool,
+) -> genai.GenerativeModel:
+    key = (model, system or "", temperature, json_mode)
+    if key not in _model_cache:
+        _model_cache[key] = genai.GenerativeModel(
+            model,
+            system_instruction=system,
+            generation_config=genai.types.GenerationConfig(
+                temperature=temperature,
+                response_mime_type="application/json" if json_mode else "text/plain",
+            ),
+        )
+    return _model_cache[key]
 
 
 def call_llm(
@@ -32,15 +53,7 @@ def call_llm(
     json_mode: bool = False,
 ) -> str:
     """Call Gemini and return the raw response text."""
-    generation_config = genai.types.GenerationConfig(
-        temperature=temperature,
-        response_mime_type="application/json" if json_mode else "text/plain",
-    )
-    gemini_model = genai.GenerativeModel(
-        model,
-        system_instruction=system,
-        generation_config=generation_config,
-    )
+    gemini_model = _get_model(model, system, temperature, json_mode)
     response = gemini_model.generate_content(prompt)
     return response.text.strip()
 
@@ -64,7 +77,10 @@ def call_llm_json(
         match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
         if match:
             text = match.group(1).strip()
-    return json.loads(text)
+    parsed = json.loads(text)
+    if isinstance(parsed, list):
+        parsed = parsed[0] if parsed else {}
+    return parsed
 
 
 def call_llm_vision_json(
@@ -86,23 +102,17 @@ def call_llm_vision_json(
     """
     parts: list = []
     for b64 in images_b64:
-        data = base64.b64decode(b64)
-        img = PIL.Image.open(io.BytesIO(data))
-        parts.append(img)
-    # Append system instruction inline when provided (vision models may not
-    # support a separate system_instruction parameter in all SDK versions)
-    if system:
-        parts.insert(0, system + "\n\n")
+        # Send raw bytes via protobuf Part — avoids PIL decode + re-serialization overhead
+        raw_bytes = base64.b64decode(b64)
+        parts.append(genai.protos.Part(
+            inline_data=genai.protos.Blob(
+                mime_type="image/jpeg",
+                data=raw_bytes,
+            )
+        ))
     parts.append(prompt)
 
-    generation_config = genai.types.GenerationConfig(
-        temperature=temperature,
-        response_mime_type="text/plain",
-    )
-    gemini_model = genai.GenerativeModel(
-        model,
-        generation_config=generation_config,
-    )
+    gemini_model = _get_model(model, system, temperature, json_mode=True)
     response = gemini_model.generate_content(parts)
     text = response.text.strip()
     # Extract JSON block if wrapped in markdown fences
@@ -116,4 +126,7 @@ def call_llm_vision_json(
         end = text.rfind("}") + 1
         if start != -1 and end > start:
             text = text[start:end]
-    return json.loads(text)
+    parsed = json.loads(text)
+    if isinstance(parsed, list):
+        parsed = parsed[0] if parsed else {}
+    return parsed

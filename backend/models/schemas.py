@@ -46,6 +46,9 @@ class TrajectoryEventPayload(BaseModel):
     feedback_type: Optional[str] = None  # "explicit" | "implicit"
     is_correction: Optional[bool] = None  # True if prompt was a correction of prior edit
     timing_ms: Optional[Dict[str, int]] = None  # {vlm, memory, planner, validator, tool_exec, total}
+    # prompt recommendations
+    recommendations: Optional[List[Dict[str, Any]]] = None
+    selected_recommendation_index: Optional[int] = None
 
 
 class TrajectoryEvent(BaseModel):
@@ -109,6 +112,7 @@ class SessionInfoResponse(BaseModel):
 class EditRequest(BaseModel):
     user_text: str
     input_image_b64: Optional[str] = None  # If set, use this as source instead of session.current_image_b64
+    selected_recommendation_index: Optional[int] = None
 
 
 class EditResponse(BaseModel):

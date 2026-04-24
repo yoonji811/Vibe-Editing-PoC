@@ -1,22 +1,32 @@
 import { useState } from 'react'
-
-const SUGGESTIONS = ['ENHANCE LIGHTING', 'SHIFT CONTRAST', 'WARM TONE']
+import type { Recommendation } from '../api/client'
 
 interface Props {
   isLoading: boolean
-  onSend: (text: string) => void
+  onSend: (text: string, selectedRecommendationIndex?: number) => void
   onSave: () => void
   error: string | null
+  recommendations?: Recommendation[]
+  isLoadingRecommendations?: boolean
 }
 
-export default function ChatPanel({ isLoading, onSend, error }: Props) {
+export default function ChatPanel({
+  isLoading,
+  onSend,
+  error,
+  recommendations = [],
+  isLoadingRecommendations = false,
+}: Props) {
   const [input, setInput] = useState('')
+  const [selectedIndex, setSelectedIndex] = useState<number | undefined>(undefined)
 
   const submit = () => {
     const text = input.trim()
     if (!text || isLoading) return
+    const idx = selectedIndex
     setInput('')
-    onSend(text)
+    setSelectedIndex(undefined)
+    onSend(text, idx)
   }
 
   const onKey = (e: React.KeyboardEvent) => {
@@ -26,16 +36,52 @@ export default function ChatPanel({ isLoading, onSend, error }: Props) {
     }
   }
 
+  const handleChipClick = (rec: Recommendation, index: number) => {
+    setInput(rec.text)
+    setSelectedIndex(index)
+  }
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setInput(e.target.value)
+    // Clear selected index if user modifies the text
+    setSelectedIndex(undefined)
+  }
+
+  const showRecommendations = !isLoading && (isLoadingRecommendations || recommendations.length > 0)
+
   return (
     <div className="bg-white border-t border-gray-200 px-6 py-4 shrink-0">
       {error && <p className="text-red-500 text-xs mb-2 text-center">{error}</p>}
+
+      {/* Recommendations above input */}
+      {showRecommendations && (
+        <div className="flex items-center justify-center gap-2 mb-3 flex-wrap">
+          {isLoadingRecommendations ? (
+            <>
+              <div className="h-7 w-28 bg-gray-100 rounded-full animate-pulse" />
+              <div className="h-7 w-32 bg-gray-100 rounded-full animate-pulse" />
+              <div className="h-7 w-24 bg-gray-100 rounded-full animate-pulse" />
+            </>
+          ) : (
+            recommendations.map((rec, i) => (
+              <button
+                key={i}
+                onClick={() => handleChipClick(rec, i)}
+                className="text-xs text-gray-500 hover:text-blue-600 bg-gray-50 hover:bg-blue-50 border border-gray-200 hover:border-blue-200 rounded-full px-3 py-1.5 transition-colors"
+              >
+                {rec.text}
+              </button>
+            ))
+          )}
+        </div>
+      )}
 
       <div className={`flex items-center gap-3 bg-gray-50 border rounded-full px-4 py-2.5 transition-colors ${
         isLoading ? 'border-gray-200 opacity-70' : 'border-gray-200 hover:border-gray-300 focus-within:border-blue-300'
       }`}>
         <input
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={handleInputChange}
           onKeyDown={onKey}
           placeholder='Instruct the Editor... (e.g. "Make it brighter")'
           disabled={isLoading}
@@ -62,21 +108,6 @@ export default function ChatPanel({ isLoading, onSend, error }: Props) {
             </svg>
           )}
         </button>
-      </div>
-
-      {/* Suggestions */}
-      <div className="flex items-center justify-center gap-1 mt-3 flex-wrap">
-        {SUGGESTIONS.map((s, i) => (
-          <span key={s} className="flex items-center gap-1">
-            {i > 0 && <span className="text-gray-300 text-xs">•</span>}
-            <button
-              onClick={() => setInput(s.toLowerCase().replace(/_/g, ' '))}
-              className="text-xs text-gray-400 hover:text-gray-600 tracking-widest uppercase font-medium"
-            >
-              {s}
-            </button>
-          </span>
-        ))}
       </div>
     </div>
   )

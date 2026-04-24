@@ -1,4 +1,5 @@
 """Session management endpoints."""
+import asyncio
 import base64
 import hashlib
 import uuid
@@ -6,7 +7,7 @@ from datetime import datetime
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 
 from models.schemas import (
     ChatMessage,
@@ -39,8 +40,25 @@ def _decode_upload(data: bytes) -> tuple[str, int, int]:
     return b64, w, h
 
 
+def _upload_and_record(session_id: str, b64: str, trajectory: Trajectory, filename: str, size_bytes: int, w: int, h: int):
+    """Background task: upload to Cloudinary and update trajectory."""
+    original_url = image_store.upload_image(b64, f"{session_id}/original")
+    event = TrajectoryEvent(
+        type="image_upload",
+        payload=TrajectoryEventPayload(
+            filename=filename,
+            size_bytes=size_bytes,
+            width=w,
+            height=h,
+            image_url=original_url,
+        ),
+    )
+    append_event(trajectory, event)
+
+
 @router.post("/new", response_model=SessionCreateResponse)
 async def create_session(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     user_nickname: str = Form(...),
 ):
@@ -58,9 +76,6 @@ async def create_session(
     now = datetime.utcnow()
     mime = file.content_type or "image/jpeg"
     filename = file.filename or "upload.jpg"
-
-    # Upload original image to Cloudinary
-    original_url = image_store.upload_image(b64, f"{session_id}/original")
 
     img_info = OriginalImageInfo(
         filename=filename,
@@ -88,18 +103,10 @@ async def create_session(
     )
     store.set_session(session_id, session)
 
-    # Record upload event
-    event = TrajectoryEvent(
-        type="image_upload",
-        payload=TrajectoryEventPayload(
-            filename=filename,
-            size_bytes=len(raw),
-            width=w,
-            height=h,
-            image_url=original_url,
-        ),
+    # Cloudinary upload in background — does not block the response
+    background_tasks.add_task(
+        _upload_and_record, session_id, b64, trajectory, filename, len(raw), w, h
     )
-    append_event(trajectory, event)
 
     return SessionCreateResponse(
         session_id=session_id,
@@ -111,8 +118,26 @@ async def create_session(
     )
 
 
+def _upload_and_record_generated(session_id: str, b64: str, trajectory: Trajectory, filename: str, size_bytes: int, w: int, h: int, prompt: str):
+    """Background task: upload generated image to Cloudinary and update trajectory."""
+    original_url = image_store.upload_image(b64, f"{session_id}/original")
+    event = TrajectoryEvent(
+        type="image_upload",
+        payload=TrajectoryEventPayload(
+            filename=filename,
+            size_bytes=size_bytes,
+            width=w,
+            height=h,
+            image_url=original_url,
+            user_text=prompt,
+        ),
+    )
+    append_event(trajectory, event)
+
+
 @router.post("/generate", response_model=SessionCreateResponse)
 async def generate_session(
+    background_tasks: BackgroundTasks,
     prompt: str = Form(...),
     user_nickname: str = Form(...),
 ):
@@ -136,8 +161,6 @@ async def generate_session(
     session_id = str(uuid.uuid4())
     now = datetime.utcnow()
     filename = f"generated_{session_id[:8]}.jpg"
-
-    original_url = image_store.upload_image(b64, f"{session_id}/original")
 
     img_info = OriginalImageInfo(
         filename=filename,
@@ -164,18 +187,10 @@ async def generate_session(
     )
     store.set_session(session_id, session)
 
-    event = TrajectoryEvent(
-        type="image_upload",
-        payload=TrajectoryEventPayload(
-            filename=filename,
-            size_bytes=len(buf),
-            width=w,
-            height=h,
-            image_url=original_url,
-            user_text=prompt,
-        ),
+    # Cloudinary upload in background — does not block the response
+    background_tasks.add_task(
+        _upload_and_record_generated, session_id, b64, trajectory, filename, len(buf), w, h, prompt
     )
-    append_event(trajectory, event)
 
     return SessionCreateResponse(
         session_id=session_id,

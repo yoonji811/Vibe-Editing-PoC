@@ -62,6 +62,7 @@ export async function editImage(
   sessionId: string,
   userText: string,
   inputImageB64?: string,
+  selectedRecommendationIndex?: number,
 ): Promise<EditResponse> {
   const res = await fetch(`${BASE}/api/edit/${sessionId}`, {
     method: 'POST',
@@ -69,10 +70,33 @@ export async function editImage(
     body: JSON.stringify({
       user_text: userText,
       ...(inputImageB64 ? { input_image_b64: inputImageB64 } : {}),
+      ...(selectedRecommendationIndex != null ? { selected_recommendation_index: selectedRecommendationIndex } : {}),
     }),
   })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
+}
+
+export interface Recommendation {
+  text: string
+  category: string
+}
+
+export async function getRecommendations(sessionId: string): Promise<Recommendation[]> {
+  try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 25000)
+    const res = await fetch(`${BASE}/api/session/${sessionId}/recommendations`, {
+      method: 'POST',
+      signal: controller.signal,
+    })
+    clearTimeout(timeout)
+    if (!res.ok) return []
+    const data = await res.json()
+    return data.recommendations ?? []
+  } catch {
+    return []
+  }
 }
 
 export interface ResumeEditResponse {
