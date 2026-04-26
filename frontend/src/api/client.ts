@@ -25,6 +25,8 @@ export interface SessionInfoResponse {
 
 export interface EditResponse {
   session_id: string
+  edit_id: string | null
+  parent_edit_id: string | null
   result_image_b64: string | null
   chat_message: string
   intent: string
@@ -32,6 +34,29 @@ export interface EditResponse {
   operation: string | null
   params: Record<string, unknown> | null
   latency_ms: number
+}
+
+export interface TreeNode {
+  edit_id: string
+  parent_edit_id: string | null
+  prompt: string
+  intent: string
+  created_at: string
+  children_ids: string[]
+}
+
+export interface EditTree {
+  session_id: string
+  current_edit_id: string | null
+  root_edit_id: string | null
+  nodes: TreeNode[]
+}
+
+export interface NavigateResponse {
+  ok: boolean
+  edit_id: string
+  image_b64: string
+  message?: string
 }
 
 export interface SessionSummary {
@@ -62,6 +87,7 @@ export async function editImage(
   userText: string,
   inputImageB64?: string,
   selectedRecommendationIndex?: number,
+  baseEditId?: string,
 ): Promise<EditResponse> {
   const res = await fetch(`${BASE}/api/edit/${sessionId}`, {
     method: 'POST',
@@ -70,8 +96,31 @@ export async function editImage(
       user_text: userText,
       ...(inputImageB64 ? { input_image_b64: inputImageB64 } : {}),
       ...(selectedRecommendationIndex != null ? { selected_recommendation_index: selectedRecommendationIndex } : {}),
+      ...(baseEditId ? { base_edit_id: baseEditId } : {}),
     }),
   })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function undoEdit(sessionId: string): Promise<NavigateResponse> {
+  const res = await fetch(`${BASE}/api/edit/${sessionId}/undo`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function navigateNode(sessionId: string, editId: string): Promise<NavigateResponse> {
+  const res = await fetch(`${BASE}/api/edit/${sessionId}/navigate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ edit_id: editId }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getEditTree(sessionId: string): Promise<EditTree> {
+  const res = await fetch(`${BASE}/api/edit/${sessionId}/tree`)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }

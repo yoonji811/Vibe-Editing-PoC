@@ -22,6 +22,9 @@ from models.schemas import (
 import store
 from services.trajectory_store import append_event, save_trajectory, load_trajectory
 from services import image_store, gemini_editor
+from agents.orchestrator import OrchestratorAgent
+
+_orchestrator = OrchestratorAgent()
 
 router = APIRouter(prefix="/api/session", tags=["session"])
 
@@ -40,7 +43,7 @@ def _decode_upload(data: bytes) -> tuple[str, int, int]:
     return b64, w, h
 
 
-def _upload_and_record(session_id: str, b64: str, trajectory: Trajectory, filename: str, size_bytes: int, w: int, h: int):
+def _upload_and_record(session_id: str, b64: str, trajectory: Trajectory, filename: str, size_bytes: int, w: int, h: int, root_edit_id: str | None = None):
     """Background task: upload to Cloudinary and update trajectory."""
     original_url = image_store.upload_image(b64, f"{session_id}/original")
     event = TrajectoryEvent(
@@ -51,6 +54,7 @@ def _upload_and_record(session_id: str, b64: str, trajectory: Trajectory, filena
             width=w,
             height=h,
             image_url=original_url,
+            edit_id=root_edit_id,
         ),
     )
     append_event(trajectory, event)
@@ -92,11 +96,15 @@ async def create_session(
         original_image=img_info,
     )
 
+    # Register root node in edit tree
+    root_edit_id = _orchestrator.register_root_image(session_id, b64)
+
     session = SessionState(
         session_id=session_id,
         user_nickname=user_nickname,
         created_at=now,
         current_image_b64=b64,
+        current_edit_id=root_edit_id,
         edit_history=[b64],
         trajectory=trajectory,
         original_filename=filename,
@@ -105,7 +113,7 @@ async def create_session(
 
     # Cloudinary upload in background — does not block the response
     background_tasks.add_task(
-        _upload_and_record, session_id, b64, trajectory, filename, len(raw), w, h
+        _upload_and_record, session_id, b64, trajectory, filename, len(raw), w, h, root_edit_id
     )
 
     return SessionCreateResponse(
@@ -118,7 +126,7 @@ async def create_session(
     )
 
 
-def _upload_and_record_generated(session_id: str, b64: str, trajectory: Trajectory, filename: str, size_bytes: int, w: int, h: int, prompt: str):
+def _upload_and_record_generated(session_id: str, b64: str, trajectory: Trajectory, filename: str, size_bytes: int, w: int, h: int, prompt: str, root_edit_id: str | None = None):
     """Background task: upload generated image to Cloudinary and update trajectory."""
     original_url = image_store.upload_image(b64, f"{session_id}/original")
     event = TrajectoryEvent(
@@ -130,6 +138,7 @@ def _upload_and_record_generated(session_id: str, b64: str, trajectory: Trajecto
             height=h,
             image_url=original_url,
             user_text=prompt,
+            edit_id=root_edit_id,
         ),
     )
     append_event(trajectory, event)
@@ -176,11 +185,15 @@ async def generate_session(
         updated_at=now,
         original_image=img_info,
     )
+    # Register root node in edit tree
+    root_edit_id = _orchestrator.register_root_image(session_id, b64)
+
     session = SessionState(
         session_id=session_id,
         user_nickname=user_nickname,
         created_at=now,
         current_image_b64=b64,
+        current_edit_id=root_edit_id,
         edit_history=[b64],
         trajectory=trajectory,
         original_filename=filename,
@@ -189,7 +202,7 @@ async def generate_session(
 
     # Cloudinary upload in background — does not block the response
     background_tasks.add_task(
-        _upload_and_record_generated, session_id, b64, trajectory, filename, len(buf), w, h, prompt
+        _upload_and_record_generated, session_id, b64, trajectory, filename, len(buf), w, h, prompt, root_edit_id
     )
 
     return SessionCreateResponse(
@@ -266,11 +279,17 @@ async def restore_session(
 
     # Restore session in memory under the ORIGINAL session_id
     filename = traj.original_image.filename if traj.original_image else "restored.jpg"
+
+    # Reset orchestrator state and register root for this restored session
+    _orchestrator.reset_session(session_id)
+    root_edit_id = _orchestrator.register_root_image(session_id, b64)
+
     session = SessionState(
         session_id=session_id,
         user_nickname=user_nickname,
         created_at=traj.created_at,
         current_image_b64=b64,
+        current_edit_id=root_edit_id,
         edit_history=[b64],
         trajectory=traj,
         original_filename=filename,
@@ -333,11 +352,17 @@ async def resume_and_edit(
 
     # 4. Set up session in memory
     filename = traj.original_image.filename if traj.original_image else "restored.jpg"
+
+    # Reset orchestrator state and register root for this restored session
+    _orchestrator.reset_session(session_id)
+    root_edit_id = _orchestrator.register_root_image(session_id, b64)
+
     session_obj = SessionState(
         session_id=session_id,
         user_nickname=user_nickname,
         created_at=traj.created_at,
         current_image_b64=b64,
+        current_edit_id=root_edit_id,
         edit_history=[b64],
         trajectory=traj,
         original_filename=filename,
@@ -410,11 +435,15 @@ async def resume_session(
         updated_at=now,
         original_image=img_info,
     )
+    # Register root node in edit tree
+    root_edit_id = _orchestrator.register_root_image(session_id, b64)
+
     session = SessionState(
         session_id=session_id,
         user_nickname=user_nickname,
         created_at=now,
         current_image_b64=b64,
+        current_edit_id=root_edit_id,
         edit_history=[b64],
         trajectory=trajectory,
         original_filename=filename,
@@ -429,6 +458,7 @@ async def resume_session(
             width=w,
             height=h,
             image_url=original_url,
+            edit_id=root_edit_id,
         ),
     )
     append_event(trajectory, event)

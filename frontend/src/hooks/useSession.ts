@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import * as api from '../api/client'
 
 export interface HistoryEntry {
@@ -6,13 +6,18 @@ export interface HistoryEntry {
   imageUrl?: string
   label: string
   timestamp: string
+  editId?: string
 }
 
 export interface SessionHook {
   sessionId: string | null
   nickname: string | null
   currentImageB64: string | null
+  currentEditId: string | null
+  activeLeafId: string | null
   history: HistoryEntry[]
+  editTree: api.TreeNode[]
+  rootEditId: string | null
   chatHistory: api.ChatMessage[]
   isLoading: boolean
   error: string | null
@@ -20,22 +25,63 @@ export interface SessionHook {
   isLoadingRecommendations: boolean
   uploadImage: (file: File, nickname: string) => Promise<void>
   generateFromText: (prompt: string, nickname: string) => Promise<void>
-  sendMessage: (text: string, inputImageB64?: string, selectedRecommendationIndex?: number) => Promise<void>
+  sendMessage: (text: string, inputImageB64?: string, selectedRecommendationIndex?: number, baseEditId?: string) => Promise<void>
   resumeAndSend: (originalSessionId: string, imageUrl: string, text: string, userNickname: string, priorSteps?: { text: string; imageUrl: string | null }[], resumeIdx?: number) => Promise<void>
+  /** Move the cursor to a node within the current branch (no API call). */
+  setCursorTo: (editId: string) => void
+  /** Move cursor to node, fetch image from server if not cached. Does NOT change active branch. */
+  moveCursorTo: (editId: string) => Promise<void>
+  /** Navigate to an arbitrary node (may switch branch, fetches image if needed). */
+  navigateToNode: (editId: string) => Promise<void>
   saveImage: () => Promise<void>
   resetSession: () => void
+}
+
+/** Compute ancestor chain from tree nodes: root → ... → targetId */
+function getAncestorChain(nodes: api.TreeNode[], targetId: string | null): api.TreeNode[] {
+  if (!targetId || nodes.length === 0) return []
+  const nodeMap = new Map(nodes.map(n => [n.edit_id, n]))
+  const chain: api.TreeNode[] = []
+  let current = targetId
+  while (current) {
+    const node = nodeMap.get(current)
+    if (!node) break
+    chain.push(node)
+    current = node.parent_edit_id ?? ''
+    if (!current) break
+  }
+  chain.reverse()
+  return chain
+}
+
+/** Find the deepest leaf starting from a given node (follow first child). */
+function findDeepestLeaf(nodes: api.TreeNode[], startId: string): string {
+  const nodeMap = new Map(nodes.map(n => [n.edit_id, n]))
+  let current = startId
+  while (true) {
+    const node = nodeMap.get(current)
+    if (!node || node.children_ids.length === 0) break
+    current = node.children_ids[0] // follow the first child
+  }
+  return current
 }
 
 export function useSession(): SessionHook {
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [nickname, setNickname] = useState<string | null>(null)
   const [currentImageB64, setCurrentImageB64] = useState<string | null>(null)
-  const [history, setHistory] = useState<HistoryEntry[]>([])
+  // currentEditId: which node the user is VIEWING (cursor position in the branch)
+  const [currentEditId, setCurrentEditId] = useState<string | null>(null)
+  // activeLeafId: the leaf of the branch being displayed (determines which branch to show)
+  const [activeLeafId, setActiveLeafId] = useState<string | null>(null)
+  const [editTree, setEditTree] = useState<api.TreeNode[]>([])
+  const [rootEditId, setRootEditId] = useState<string | null>(null)
   const [chatHistory, setChatHistory] = useState<api.ChatMessage[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [recommendations, setRecommendations] = useState<api.Recommendation[]>([])
   const [isLoadingRecommendations, setIsLoadingRecommendations] = useState(false)
+  const [imageCache, setImageCache] = useState<Record<string, string>>({})
 
   const fetchRecommendations = useCallback(async (sid: string) => {
     setIsLoadingRecommendations(true)
@@ -49,6 +95,38 @@ export function useSession(): SessionHook {
     }
   }, [])
 
+  // Derive history from tree: ancestor chain of activeLeafId (full branch)
+  const history: HistoryEntry[] = useMemo(() => {
+    const chain = getAncestorChain(editTree, activeLeafId)
+    return chain.map(node => ({
+      imageB64: imageCache[node.edit_id],
+      label: node.prompt === 'original' ? 'Original Image' : (node.intent || node.prompt),
+      timestamp: node.created_at,
+      editId: node.edit_id,
+    }))
+  }, [editTree, activeLeafId, imageCache])
+
+  const addTreeNode = useCallback((editId: string, parentEditId: string | null, prompt: string, intent: string) => {
+    setEditTree(prev => {
+      const updated = prev.map(n =>
+        n.edit_id === parentEditId && !n.children_ids.includes(editId)
+          ? { ...n, children_ids: [...n.children_ids, editId] }
+          : n
+      )
+      if (!updated.some(n => n.edit_id === editId)) {
+        updated.push({
+          edit_id: editId,
+          parent_edit_id: parentEditId,
+          prompt,
+          intent,
+          created_at: new Date().toISOString(),
+          children_ids: [],
+        })
+      }
+      return updated
+    })
+  }, [])
+
   const uploadImage = useCallback(async (file: File, userNickname: string) => {
     setIsLoading(true)
     setError(null)
@@ -57,9 +135,18 @@ export function useSession(): SessionHook {
       setSessionId(res.session_id)
       setNickname(userNickname)
       setCurrentImageB64(res.original_image_b64)
-      setHistory([{ imageB64: res.original_image_b64, label: 'Original Image', timestamp: new Date().toISOString() }])
       setChatHistory([])
       setRecommendations([])
+
+      const tree = await api.getEditTree(res.session_id)
+      setEditTree(tree.nodes)
+      setRootEditId(tree.root_edit_id)
+      setCurrentEditId(tree.current_edit_id)
+      setActiveLeafId(tree.current_edit_id)
+      if (tree.current_edit_id) {
+        setImageCache({ [tree.current_edit_id]: res.original_image_b64 })
+      }
+
       fetchRecommendations(res.session_id)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -76,9 +163,18 @@ export function useSession(): SessionHook {
       setSessionId(res.session_id)
       setNickname(userNickname)
       setCurrentImageB64(res.original_image_b64)
-      setHistory([{ imageB64: res.original_image_b64, label: 'Generated Image', timestamp: new Date().toISOString() }])
       setChatHistory([])
       setRecommendations([])
+
+      const tree = await api.getEditTree(res.session_id)
+      setEditTree(tree.nodes)
+      setRootEditId(tree.root_edit_id)
+      setCurrentEditId(tree.current_edit_id)
+      setActiveLeafId(tree.current_edit_id)
+      if (tree.current_edit_id) {
+        setImageCache({ [tree.current_edit_id]: res.original_image_b64 })
+      }
+
       fetchRecommendations(res.session_id)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -88,11 +184,10 @@ export function useSession(): SessionHook {
   }, [])
 
   const sendMessage = useCallback(
-    async (text: string, inputImageB64?: string, selectedRecommendationIndex?: number) => {
+    async (text: string, inputImageB64?: string, selectedRecommendationIndex?: number, baseEditId?: string) => {
       if (!sessionId) return
       setIsLoading(true)
       setError(null)
-      // Optimistic: add user message immediately
       const userMsg: api.ChatMessage = {
         role: 'user',
         content: text,
@@ -100,32 +195,104 @@ export function useSession(): SessionHook {
       }
       setChatHistory((prev) => [...prev, userMsg])
       try {
-        const res = await api.editImage(sessionId, text, inputImageB64, selectedRecommendationIndex)
-        // Assistant reply
+        const res = await api.editImage(sessionId, text, inputImageB64, selectedRecommendationIndex, baseEditId || currentEditId || undefined)
         const assistantMsg: api.ChatMessage = {
           role: 'assistant',
           content: res.chat_message,
           timestamp: new Date().toISOString(),
         }
         setChatHistory((prev) => [...prev, assistantMsg])
+
         if (res.result_image_b64) {
           setCurrentImageB64(res.result_image_b64)
           setRecommendations([])
-          const label = res.operation ?? res.intent ?? '편집'
-          setHistory((prev) => [
-            ...prev,
-            { imageB64: res.result_image_b64!, label, timestamp: new Date().toISOString() },
-          ])
+        }
+
+        if (res.edit_id) {
+          setCurrentEditId(res.edit_id)
+          if (res.result_image_b64) {
+            setImageCache(prev => ({ ...prev, [res.edit_id!]: res.result_image_b64! }))
+          }
+          if (res.operation !== 'undo' && res.operation !== 'reset') {
+            addTreeNode(res.edit_id, res.parent_edit_id ?? null, text, res.intent)
+            // New edit = new leaf, switch branch to it
+            setActiveLeafId(res.edit_id)
+          }
+          // Undo/reset: only move currentEditId (already set above).
+          // Keep activeLeafId unchanged so the full branch stays visible.
         }
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e))
-        setChatHistory((prev) => prev.slice(0, -1)) // remove optimistic
+        setChatHistory((prev) => prev.slice(0, -1))
       } finally {
         setIsLoading(false)
       }
     },
-    [sessionId]
+    [sessionId, currentEditId, addTreeNode]
   )
+
+  /** Move cursor within the current branch — no API call, no branch switch. */
+  const setCursorTo = useCallback((editId: string) => {
+    setCurrentEditId(editId)
+    const cached = imageCache[editId]
+    if (cached) {
+      setCurrentImageB64(cached)
+    }
+  }, [imageCache])
+
+  /** Move cursor to node without changing branch — fetches image from server if not cached. */
+  const moveCursorTo = useCallback(async (editId: string) => {
+    setCurrentEditId(editId)
+    const cached = imageCache[editId]
+    if (cached) {
+      setCurrentImageB64(cached)
+      return
+    }
+    if (!sessionId) return
+    try {
+      const res = await api.navigateNode(sessionId, editId)
+      if (res.ok) {
+        setCurrentImageB64(res.image_b64)
+        setImageCache(prev => ({ ...prev, [res.edit_id]: res.image_b64 }))
+      }
+    } catch { /* non-fatal */ }
+  }, [sessionId, imageCache])
+
+  /** Navigate to an arbitrary node — fetches fresh tree + image from server. */
+  const navigateToNode = useCallback(async (editId: string) => {
+    if (!sessionId) return
+    try {
+      // Optimistic: show cached image immediately while request is in-flight
+      const cached = imageCache[editId]
+      if (cached) setCurrentImageB64(cached)
+
+      // Fetch image and authoritative tree in parallel
+      const [navRes, treeRes] = await Promise.all([
+        api.navigateNode(sessionId, editId),
+        api.getEditTree(sessionId),
+      ])
+
+      if (!navRes.ok) return
+
+      // Compute leaf from fresh server tree (avoids stale-closure on local editTree)
+      const freshNodes = treeRes.nodes
+      const nodeMap = new Map(freshNodes.map(n => [n.edit_id, n]))
+      let leaf = editId
+      while (true) {
+        const n = nodeMap.get(leaf)
+        if (!n || n.children_ids.length === 0) break
+        leaf = n.children_ids[0]
+      }
+
+      setEditTree(freshNodes)
+      setActiveLeafId(leaf)
+      setCurrentEditId(editId)
+      setCurrentImageB64(navRes.image_b64)
+      setImageCache(prev => ({ ...prev, [navRes.edit_id]: navRes.image_b64 }))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }, [sessionId, imageCache])
 
   const resumeAndSend = useCallback(async (
     originalSessionId: string,
@@ -138,9 +305,6 @@ export function useSession(): SessionHook {
     setIsLoading(true)
     setError(null)
     try {
-      // Single atomic call: restore session to step + apply edit in one request.
-      // This avoids the timing issue where editImage can't find the session
-      // in memory if restore and edit are two separate requests.
       const res = await api.resumeAndEdit(
         originalSessionId,
         imageUrl,
@@ -153,24 +317,20 @@ export function useSession(): SessionHook {
       setNickname(userNickname)
       setCurrentImageB64(res.result_image_b64 ?? res.original_image_b64)
 
-      // Build history: prior steps (URL-based) + resumed step (b64) + new edit result
+      const tree = await api.getEditTree(res.session_id)
+      setEditTree(tree.nodes)
+      setRootEditId(tree.root_edit_id)
+      setCurrentEditId(tree.current_edit_id)
+      setActiveLeafId(tree.current_edit_id)
+
+      const cache: Record<string, string> = {}
+      if (tree.root_edit_id) cache[tree.root_edit_id] = res.original_image_b64
+      if (tree.current_edit_id && res.result_image_b64) {
+        cache[tree.current_edit_id] = res.result_image_b64
+      }
+      setImageCache(cache)
+
       const now = new Date().toISOString()
-      const priorHistory: HistoryEntry[] =
-        priorSteps && resumeIdx !== undefined
-          ? priorSteps.slice(0, resumeIdx + 1).map((step, i) => ({
-              imageB64: i === resumeIdx ? res.original_image_b64 : undefined,
-              imageUrl: i !== resumeIdx ? (step.imageUrl ?? undefined) : undefined,
-              label: step.text,
-              timestamp: now,
-            }))
-          : [{ imageB64: res.original_image_b64, label: 'Resumed Image', timestamp: now }]
-
-      const editEntry: HistoryEntry | null = res.result_image_b64
-        ? { imageB64: res.result_image_b64, label: res.operation ?? res.intent ?? '편집', timestamp: now }
-        : null
-
-      setHistory(editEntry ? [...priorHistory, editEntry] : priorHistory)
-
       const userMsg: api.ChatMessage = { role: 'user', content: text, timestamp: now }
       const assistantMsg: api.ChatMessage = { role: 'assistant', content: res.chat_message, timestamp: now }
       setChatHistory([userMsg, assistantMsg])
@@ -183,7 +343,6 @@ export function useSession(): SessionHook {
 
   const saveImage = useCallback(async () => {
     if (!sessionId || !currentImageB64) return
-    // Trigger download
     const a = document.createElement('a')
     a.href = `data:image/jpeg;base64,${currentImageB64}`
     a.download = `edited_${sessionId.slice(0, 8)}.jpg`
@@ -195,7 +354,11 @@ export function useSession(): SessionHook {
     setSessionId(null)
     setNickname(null)
     setCurrentImageB64(null)
-    setHistory([])
+    setCurrentEditId(null)
+    setActiveLeafId(null)
+    setEditTree([])
+    setRootEditId(null)
+    setImageCache({})
     setChatHistory([])
     setError(null)
     setRecommendations([])
@@ -206,7 +369,11 @@ export function useSession(): SessionHook {
     sessionId,
     nickname,
     currentImageB64,
+    currentEditId,
+    activeLeafId,
     history,
+    editTree,
+    rootEditId,
     chatHistory,
     isLoading,
     error,
@@ -216,6 +383,9 @@ export function useSession(): SessionHook {
     generateFromText,
     sendMessage,
     resumeAndSend,
+    setCursorTo,
+    moveCursorTo,
+    navigateToNode,
     saveImage,
     resetSession,
   }

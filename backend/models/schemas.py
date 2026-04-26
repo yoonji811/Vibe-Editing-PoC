@@ -34,6 +34,9 @@ class TrajectoryEventPayload(BaseModel):
     size_bytes: Optional[int] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    # edit tree identifiers
+    edit_id: Optional[str] = None
+    parent_edit_id: Optional[str] = None
     # agent pipeline details
     plan: Optional[Dict[str, Any]] = None
     validator_verdict: Optional[Dict[str, Any]] = None
@@ -76,6 +79,7 @@ class SessionState(BaseModel):
     user_nickname: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     current_image_b64: Optional[str] = None
+    current_edit_id: Optional[str] = None  # Current position in edit tree
     edit_history: List[str] = []      # base64 images, max 50
     chat_history: List[ChatMessage] = []
     trajectory: Optional[Trajectory] = None
@@ -106,11 +110,14 @@ class SessionInfoResponse(BaseModel):
 class EditRequest(BaseModel):
     user_text: str
     input_image_b64: Optional[str] = None  # If set, use this as source instead of session.current_image_b64
+    base_edit_id: Optional[str] = None  # Branch from this edit node; None = current
     selected_recommendation_index: Optional[int] = None
 
 
 class EditResponse(BaseModel):
     session_id: str
+    edit_id: Optional[str] = None
+    parent_edit_id: Optional[str] = None
     result_image_b64: Optional[str] = None
     chat_message: str
     intent: str

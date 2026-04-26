@@ -42,7 +42,7 @@ export default function ImageViewer({
 
       {showScrollHint && !isLoading && (
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-black/50 text-white text-xs px-3 py-1.5 rounded-full pointer-events-none whitespace-nowrap">
-          Scroll to view previous edits
+          Scroll / swipe to view previous edits
         </div>
       )}
     </div>

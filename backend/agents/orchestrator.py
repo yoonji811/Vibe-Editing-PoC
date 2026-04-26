@@ -43,8 +43,14 @@ logger = logging.getLogger(__name__)
 # {session_id: {edit_id: EditNode}}
 _edit_trees: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(dict)
 
-# {session_id: latest_edit_id}
+# {session_id: latest_edit_id}  — most recently created node (for linear fallback)
 _latest_edit: Dict[str, Optional[str]] = defaultdict(lambda: None)
+
+# {session_id: current_edit_id}  — the "cursor" (what the user is viewing)
+_current_edit: Dict[str, Optional[str]] = defaultdict(lambda: None)
+
+# {session_id: root_edit_id}  — the root node (original image)
+_root_edit: Dict[str, Optional[str]] = defaultdict(lambda: None)
 
 # Image store: {image_ref: np.ndarray}
 _image_store: Dict[str, np.ndarray] = {}
@@ -297,10 +303,10 @@ class OrchestratorAgent:
         if session_id is None:
             session_id = str(uuid.uuid4())
 
-        # Resolve base edit node
+        # Resolve base edit node — prefer cursor, fall back to latest
         tree = _edit_trees[session_id]
         if base_edit_id is None:
-            base_edit_id = _latest_edit[session_id]
+            base_edit_id = _current_edit[session_id] or _latest_edit[session_id]
 
         parent_edit_id = base_edit_id
 
@@ -361,6 +367,74 @@ class OrchestratorAgent:
                 "errors": ["Planner returned empty plan."],
             }
 
+        # ------------------------------------------------------------------
+        # 3a. Intercept session tools (undo / reset)
+        # ------------------------------------------------------------------
+        steps = plan.get("steps", [])
+        session_tool = None
+        if len(steps) == 1 and steps[0].get("tool_name") in ("undo", "reset"):
+            session_tool = steps[0]["tool_name"]
+
+        if session_tool == "undo":
+            undo_result = self.undo(session_id)
+            latency_ms = int((time.time() - t_start) * 1000)
+            if undo_result:
+                return {
+                    "session_id": session_id,
+                    "edit_id": undo_result["edit_id"],
+                    "parent_edit_id": parent_edit_id,
+                    "result_image_b64": undo_result["image_b64"],
+                    "executed_plan": plan,
+                    "explanation": "이전 상태로 되돌렸습니다.",
+                    "errors": [],
+                    "latency_ms": latency_ms,
+                    "session_action": "undo",
+                }
+            else:
+                return {
+                    "session_id": session_id,
+                    "edit_id": _current_edit.get(session_id),
+                    "parent_edit_id": parent_edit_id,
+                    "result_image_b64": _cv2_to_b64(base_image),
+                    "executed_plan": plan,
+                    "explanation": "되돌릴 편집 이력이 없습니다.",
+                    "errors": [],
+                    "latency_ms": latency_ms,
+                    "session_action": "undo",
+                }
+
+        if session_tool == "reset":
+            root_id = _root_edit.get(session_id)
+            latency_ms = int((time.time() - t_start) * 1000)
+            if root_id:
+                nav_result = self.navigate(session_id, root_id)
+                return {
+                    "session_id": session_id,
+                    "edit_id": root_id,
+                    "parent_edit_id": None,
+                    "result_image_b64": nav_result["image_b64"] if nav_result else _cv2_to_b64(base_image),
+                    "executed_plan": plan,
+                    "explanation": "원본 이미지로 초기화했습니다.",
+                    "errors": [],
+                    "latency_ms": latency_ms,
+                    "session_action": "reset",
+                }
+            else:
+                return {
+                    "session_id": session_id,
+                    "edit_id": _current_edit.get(session_id),
+                    "parent_edit_id": parent_edit_id,
+                    "result_image_b64": _cv2_to_b64(base_image),
+                    "executed_plan": plan,
+                    "explanation": "원본 이미지를 찾을 수 없습니다.",
+                    "errors": [],
+                    "latency_ms": latency_ms,
+                    "session_action": "reset",
+                }
+
+        # ------------------------------------------------------------------
+        # 3b. Execute normal plan
+        # ------------------------------------------------------------------
         result_image, exec_errors, step_logs = _execute_plan(plan, base_image)
         result_b64 = _cv2_to_b64(result_image)
 
@@ -383,6 +457,7 @@ class OrchestratorAgent:
         }
         tree[edit_id] = node
         _latest_edit[session_id] = edit_id
+        _current_edit[session_id] = edit_id
 
         # ------------------------------------------------------------------
         # 5. Build response
@@ -417,11 +492,97 @@ class OrchestratorAgent:
     def reset_session(self, session_id: str) -> None:
         """Clear the orchestrator's internal state for a session.
 
-        Call this after undo/reset so the next process_edit() uses the
-        caller-provided image_b64 instead of a stale internal image ref.
+        Only used when the session is truly deleted / new session started.
         """
         _latest_edit[session_id] = None
+        _current_edit[session_id] = None
+        _root_edit[session_id] = None
         _edit_trees[session_id].clear()
+
+    def register_root_image(self, session_id: str, image_b64: str) -> str:
+        """Register the original image as the root node of the edit tree.
+
+        Called once when a session is created. Returns the root edit_id.
+        """
+        img = _b64_to_cv2(image_b64)
+        image_ref = _store_image(img)
+        edit_id = str(uuid.uuid4())
+
+        node: Dict[str, Any] = {
+            "edit_id": edit_id,
+            "parent_edit_id": None,
+            "session_id": session_id,
+            "prompt": "original",
+            "plan": {},
+            "validator_verdict": None,
+            "quality_verdict": None,
+            "image_ref": image_ref,
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        _edit_trees[session_id][edit_id] = node
+        _latest_edit[session_id] = edit_id
+        _current_edit[session_id] = edit_id
+        _root_edit[session_id] = edit_id
+
+        logger.info("Registered root image for session=%s edit=%s", session_id, edit_id)
+        return edit_id
+
+    def undo(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Move the cursor to the parent of the current node.
+
+        Does NOT delete any nodes — the tree is preserved.
+        Returns {edit_id, image_b64} of the parent node, or None if at root.
+        """
+        current_id = _current_edit.get(session_id)
+        if not current_id:
+            return None
+
+        tree = _edit_trees.get(session_id, {})
+        current_node = tree.get(current_id)
+        if not current_node:
+            return None
+
+        parent_id = current_node.get("parent_edit_id")
+        if not parent_id:
+            return None  # Already at root
+
+        parent_node = tree.get(parent_id)
+        if not parent_node:
+            return None
+
+        _current_edit[session_id] = parent_id
+        image_b64 = _cv2_to_b64(_load_image(parent_node["image_ref"]))
+        return {
+            "edit_id": parent_id,
+            "image_b64": image_b64,
+            "prompt": parent_node["prompt"],
+        }
+
+    def navigate(self, session_id: str, edit_id: str) -> Optional[Dict[str, Any]]:
+        """Move the cursor to any node in the tree.
+
+        Returns {edit_id, image_b64} of the target node, or None if not found.
+        """
+        tree = _edit_trees.get(session_id, {})
+        node = tree.get(edit_id)
+        if not node:
+            return None
+
+        _current_edit[session_id] = edit_id
+        image_b64 = _cv2_to_b64(_load_image(node["image_ref"]))
+        return {
+            "edit_id": edit_id,
+            "image_b64": image_b64,
+            "prompt": node["prompt"],
+        }
+
+    def get_root_edit_id(self, session_id: str) -> Optional[str]:
+        """Return the root node's edit_id for a session."""
+        return _root_edit.get(session_id)
+
+    def get_current_edit_id(self, session_id: str) -> Optional[str]:
+        """Return the current cursor edit_id for a session."""
+        return _current_edit.get(session_id)
 
     # ------------------------------------------------------------------
     # Tree inspection
@@ -430,6 +591,14 @@ class OrchestratorAgent:
     def get_tree(self, session_id: str) -> Dict[str, Any]:
         """Return the full edit tree for a session."""
         tree = _edit_trees.get(session_id, {})
+
+        # Build children_ids from parent links
+        children_map: Dict[str, List[str]] = defaultdict(list)
+        for node in tree.values():
+            pid = node.get("parent_edit_id")
+            if pid:
+                children_map[pid].append(node["edit_id"])
+
         nodes = []
         for node in tree.values():
             nodes.append({
@@ -438,5 +607,11 @@ class OrchestratorAgent:
                 "prompt": node["prompt"],
                 "intent": node.get("plan", {}).get("intent", ""),
                 "created_at": node["created_at"],
+                "children_ids": children_map.get(node["edit_id"], []),
             })
-        return {"session_id": session_id, "nodes": nodes}
+        return {
+            "session_id": session_id,
+            "current_edit_id": _current_edit.get(session_id),
+            "root_edit_id": _root_edit.get(session_id),
+            "nodes": nodes,
+        }

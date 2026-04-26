@@ -47,6 +47,14 @@ Plan JSON.  You do not execute anything — you only design.
 - 흐림/선명/노이즈 → `blur`, `sharpen`, `denoise`
 - 흑백 변환 → `grayscale`
 
+### SESSION NAVIGATION tools for undo/reset:
+- `undo`: Use when the user wants to go back, revert, undo, cancel the last edit.
+  Examples: "이전으로 돌아가줘", "방금 한 거 취소", "되돌려", "undo", "go back",
+  "아까 거로", "없었던 걸로", "이전 상태가 나았어"
+- `reset`: Use when the user wants to start over from the original image.
+  Examples: "원본으로", "처음으로", "초기화", "reset", "start over"
+- These tools take NO parameters. Use a single step with empty params.
+
 ### WARNING — NEVER use for mood/color requests:
 - `hue_shift`: 모든 색상을 동일하게 회전 → 피부/하늘이 기괴하게 변함. 사용 금지.
 - `saturation`: 단독으로는 분위기를 만들 수 없음.
