@@ -1,8 +1,11 @@
 """Planner Agent — converts user prompt → Plan JSON using Gemini.
 
+V2 changes:
+  - Accepts retrieved_cases (RAG memory) for few-shot plan guidance
+    (VLM context reaches Planner only indirectly, embedded inside RAG cases)
+  - Accepts previous_failed_attempts (negative constraints) to avoid repetition
+
 The Planner NEVER executes anything.  It only designs the plan.
-Context quality (tool catalog, image metadata, ancestor chain) determines
-plan quality — not hard-coded intent rules.
 """
 from __future__ import annotations
 
@@ -13,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from .llm import call_llm_json
 
 # ---------------------------------------------------------------------------
-# System prompt template
+# System prompt
 # ---------------------------------------------------------------------------
 
 _SYSTEM = """\
@@ -33,7 +36,7 @@ Plan JSON.  You do not execute anything — you only design.
 - 대비/밝기 곡선 → `color_curves`
 - 전문 LUT 파일 적용 → `apply_lut`
 
-### Use GENERATIVE tools (gemini_*) ONLY for these content-level changes:
+### Use GENERATIVE tools (gemini_*) ONLY for content-level changes:
 - 배경 제거/교체 → `gemini_remove_background`
 - 특정 객체/사람 제거 → `gemini_remove_object`
 - 새 요소 추가 (눈, 동물, 텍스트 등) → `gemini_add_element`
@@ -60,20 +63,19 @@ Plan JSON.  You do not execute anything — you only design.
 - `saturation`: 단독으로는 분위기를 만들 수 없음.
 
 ## Rules
-1. Use ONLY tool names listed in "Available Tools".  Any other name goes to
-   unmet_requirements.
+1. Use ONLY tool names listed in "Available Tools".  Any other name goes to unmet_requirements.
 2. Preserve every part of the image that the user did NOT mention.
 3. Use the minimum number of steps to achieve the goal.
-4. Every step MUST have a non-empty "rationale".
-5. If a requirement cannot be met with available tools, record it in
-   unmet_requirements (do NOT make up a tool name).
-6. Return ONLY valid JSON — no markdown, no explanations outside the JSON.
+4. Every step MUST have a non-empty "rationale" — cite past RAG cases when available.
+5. If a requirement cannot be met, record it in unmet_requirements (do NOT make up a tool name).
+6. NEVER repeat a tool+params combination listed in "Previous Failed Attempts".
+7. Return ONLY valid JSON — no markdown, no explanations outside the JSON.
 
 ## Output schema
 {
   "plan_id": "<uuid4>",
   "intent": "<one sentence describing user intent>",
-  "confidence": <0.0-1.0, lower when prompt is ambiguous>,
+  "confidence": <0.0-1.0>,
   "steps": [
     {
       "step_id": "s1",
@@ -81,12 +83,12 @@ Plan JSON.  You do not execute anything — you only design.
       "params": { ... },
       "depends_on": [],
       "produces": null,
-      "rationale": "<why this step is needed>"
+      "rationale": "<why this step — cite RAG case if applicable>"
     }
   ],
   "unmet_requirements": [
     {
-      "need": "<description of unmet need>",
+      "need": "<description>",
       "why_unmet": "<which tool capability is missing>",
       "suggested_tool_type": "opencv | generative | hybrid"
     }
@@ -122,10 +124,16 @@ def _render_ancestor_chain(ancestor_chain: List[Dict[str, Any]]) -> str:
         return "  (no previous edits — this is the first edit)"
     lines = []
     for i, node in enumerate(ancestor_chain):
+        satisfaction = node.get("satisfaction")
+        sat_str = f" | satisfaction={satisfaction:.1f}" if satisfaction is not None else ""
+        correction_str = " [CORRECTION]" if node.get("is_correction") else ""
+        params = node.get("params_used", "")
+        params_str = f" | params={params}" if params else ""
         lines.append(
-            f"  T-{len(ancestor_chain)-i}: prompt='{node.get('prompt', '')}' "
+            f"  T-{len(ancestor_chain)-i}{correction_str}: prompt='{node.get('prompt', '')}' "
             f"| intent={node.get('intent', '')} "
-            f"| summary={node.get('plan_summary', '')}"
+            f"| tools={node.get('plan_summary', '')}"
+            f"{params_str}{sat_str}"
         )
     return "\n".join(lines)
 
@@ -139,12 +147,45 @@ def _render_image_meta(image_meta: Dict[str, Any]) -> str:
     )
 
 
+def _render_retrieved_cases(cases: Optional[List[Dict[str, Any]]]) -> str:
+    if not cases:
+        return "  (no similar cases found in memory)"
+    lines = []
+    for i, case in enumerate(cases, 1):
+        sim_pct = int(case.get("similarity", 0) * 100)
+        steps = case.get("plan", {}).get("steps", [])
+        step_summary = " → ".join(
+            f"{s.get('tool_name', '?')}({json.dumps(s.get('params', {}), ensure_ascii=False)})"
+            for s in steps[:4]
+        )
+        lines.append(
+            f"\n[Case {i}: similarity {sim_pct}%]\n"
+            f"  User Asked: \"{case.get('user_text', '')}\"\n"
+            f"  Applied Plan: {step_summary}\n"
+            f"  Satisfaction: {case.get('satisfaction_score', 0):.2f}"
+        )
+    return "\n".join(lines)
+
+
+def _render_failed_attempts(attempts: Optional[List[Dict[str, Any]]]) -> str:
+    if not attempts:
+        return "  (none)"
+    lines = []
+    for a in attempts:
+        lines.append(
+            f"  - tool: {a.get('tool_used', '?')} "
+            f"params: {json.dumps(a.get('params', {}), ensure_ascii=False)} "
+            f"reason: {a.get('reason_for_failure', '')}"
+        )
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # PlannerAgent
 # ---------------------------------------------------------------------------
 
 class PlannerAgent:
-    """Generates Plan JSON from a user prompt."""
+    """Generates Plan JSON from a user prompt and RAG memory cases."""
 
     def generate_plan(
         self,
@@ -154,19 +195,20 @@ class PlannerAgent:
         available_tools: List[Dict[str, Any]],
         feedback: Optional[str] = None,
         mode: str = "prod",
+        retrieved_cases: Optional[List[Dict[str, Any]]] = None,
+        previous_failed_attempts: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Generate a Plan JSON.
 
         Args:
-            prompt:          The user's current edit request.
-            ancestor_chain:  Ordered list of ancestor edits (root → parent).
-                             Each entry: {prompt, intent, plan_summary}.
-            image_meta:      {width, height, dominant_colors, detected_objects,
-                             scene_tags}
-            available_tools: Output of registry.list().
-            feedback:        Validator rejection feedback from previous attempt.
-            mode:            "prod" | "dev" — affects detail in
-                             unmet_requirements.
+            prompt:                   User's edit request.
+            ancestor_chain:           Ordered list of ancestor edits (root → parent).
+            image_meta:               Basic image metadata {width, height, dominant_colors}.
+            available_tools:          Output of registry.list().
+            feedback:                 Validator rejection feedback from previous attempt.
+            mode:                     "prod" | "dev".
+            retrieved_cases:          RAG success cases from Memory Agent.
+            previous_failed_attempts: Tools/params to avoid.
 
         Returns:
             Plan JSON dict.
@@ -174,6 +216,8 @@ class PlannerAgent:
         tool_catalog = _render_tool_catalog(available_tools)
         ancestor_ctx = _render_ancestor_chain(ancestor_chain)
         image_ctx = _render_image_meta(image_meta)
+        rag_ctx = _render_retrieved_cases(retrieved_cases)
+        failed_ctx = _render_failed_attempts(previous_failed_attempts)
 
         retry_block = ""
         if feedback:
@@ -182,9 +226,13 @@ class PlannerAgent:
         mode_block = ""
         if mode == "dev":
             mode_block = (
-                "\n## Mode: DEV\nIn dev mode, if a requirement is unmet, "
+                "\n## Mode: DEV\nIf a requirement is unmet, "
                 "set steps to [] and fully describe unmet_requirements.\n"
             )
+
+        failed_block = ""
+        if previous_failed_attempts:
+            failed_block = f"\n## Previous Failed Attempts (NEVER repeat these)\n{failed_ctx}\n"
 
         user_prompt = f"""\
 ## User Request
@@ -193,20 +241,22 @@ class PlannerAgent:
 ## Available Tools
 {tool_catalog}
 
-## Current Image State
+## Basic Image Metadata
 {image_ctx}
+
+## Reference Success Cases from Memory (RAG)
+Learn from these verified successful plans for similar situations:
+{rag_ctx}
 
 ## Edit History (oldest → most recent)
 {ancestor_ctx}
-{retry_block}{mode_block}
-Generate the Plan JSON now.  Remember: only tool names from the catalog above,
-and plan_id must be a new UUID4."""
+{failed_block}{retry_block}{mode_block}
+Generate the Plan JSON now.  plan_id must be a new UUID4.
+Cite RAG cases in each step's rationale when applicable."""
 
         raw = call_llm_json(user_prompt, system=_SYSTEM, temperature=0.0)
 
-        # Ensure plan_id exists
-        if not raw.get("plan_id"):
-            raw["plan_id"] = str(uuid.uuid4())
+        raw["plan_id"] = str(uuid.uuid4())
 
         # Self-check: remove steps with invalid tool names
         valid_names = {t["name"] for t in available_tools}

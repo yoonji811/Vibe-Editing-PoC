@@ -5,6 +5,8 @@ import ChatPanel from './components/ChatPanel'
 import HistoryBar, { type EditStep } from './components/HistoryBar'
 import * as api from './api/client'
 
+type FeedbackState = 'none' | 'up' | 'down'
+
 interface PastView {
   sessionId: string
   steps: EditStep[]
@@ -22,6 +24,7 @@ export default function App() {
   const [isHoldingOriginal, setIsHoldingOriginal] = useState(false)
   const [pastView, setPastView] = useState<PastView | null>(null)
   const [preInput, setPreInput] = useState('')
+  const [feedbackMap, setFeedbackMap] = useState<Record<string, FeedbackState>>({})
 
   // Derive historyIndex from currentEditId
   const historyIndex = useMemo(() => {
@@ -203,6 +206,20 @@ export default function App() {
     }
     return null
   })()
+
+  const handleFeedback = async (action: api.FeedbackAction) => {
+    if (!session.sessionId) return
+    const entry = session.history[historyIndex]
+    if (!entry?.eventId) return
+    const key = entry.eventId
+    if (feedbackMap[key] && feedbackMap[key] !== 'none') return // already given
+    setFeedbackMap(prev => ({ ...prev, [key]: action === 'thumbs_up' ? 'up' : 'down' }))
+    try {
+      await api.sendFeedback(session.sessionId, key, action)
+    } catch {
+      setFeedbackMap(prev => ({ ...prev, [key]: 'none' }))
+    }
+  }
 
   const handleHistorySelect = (editId: string) => {
     setPastView(null)
@@ -431,17 +448,46 @@ export default function App() {
           {/* Image area */}
           <main
             ref={mainRef}
-            className="flex items-center justify-center p-4 overflow-hidden flex-1 min-h-0"
+            className="flex flex-col items-center justify-center p-4 overflow-hidden flex-1 min-h-0"
           >
             {showImage ? (
-              <ImageViewer
-                imageSrc={displayImageSrc!}
-                isLoading={session.isLoading}
-                showScrollHint={showScrollHint && !isHoldingOriginal && !pastView}
-                onMouseDown={() => setIsHoldingOriginal(true)}
-                onMouseUp={() => setIsHoldingOriginal(false)}
-                onMouseLeave={() => setIsHoldingOriginal(false)}
-              />
+              <>
+                <ImageViewer
+                  imageSrc={displayImageSrc!}
+                  isLoading={session.isLoading}
+                  showScrollHint={showScrollHint && !isHoldingOriginal && !pastView}
+                  onMouseDown={() => setIsHoldingOriginal(true)}
+                  onMouseUp={() => setIsHoldingOriginal(false)}
+                  onMouseLeave={() => setIsHoldingOriginal(false)}
+                />
+                {/* Feedback buttons — show when viewing an edit (index > 0, has eventId) */}
+                {!pastView && !session.isLoading && historyIndex > 0 && session.history[historyIndex]?.eventId && (() => {
+                  const eventId = session.history[historyIndex].eventId!
+                  const fb = feedbackMap[eventId] ?? 'none'
+                  return (
+                    <div className="flex items-center gap-2 mt-2">
+                      <button
+                        onClick={() => handleFeedback('thumbs_up')}
+                        disabled={fb !== 'none'}
+                        title="만족"
+                        className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors text-base
+                          ${fb === 'up' ? 'bg-green-100 text-green-600' : 'bg-gray-100 hover:bg-green-50 text-gray-400 hover:text-green-500 disabled:opacity-40'}`}
+                      >
+                        👍
+                      </button>
+                      <button
+                        onClick={() => handleFeedback('thumbs_down')}
+                        disabled={fb !== 'none'}
+                        title="불만족"
+                        className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors text-base
+                          ${fb === 'down' ? 'bg-red-100 text-red-500' : 'bg-gray-100 hover:bg-red-50 text-gray-400 hover:text-red-400 disabled:opacity-40'}`}
+                      >
+                        👎
+                      </button>
+                    </div>
+                  )
+                })()}
+              </>
             ) : session.isLoading ? (
               <div className="flex flex-col items-center gap-4">
                 <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />

@@ -7,6 +7,7 @@ export interface HistoryEntry {
   label: string
   timestamp: string
   editId?: string
+  eventId?: string  // trajectory event UUID (for feedback)
 }
 
 export interface SessionHook {
@@ -103,10 +104,11 @@ export function useSession(): SessionHook {
       label: node.prompt === 'original' ? 'Original Image' : (node.intent || node.prompt),
       timestamp: node.created_at,
       editId: node.edit_id,
+      eventId: node.event_id,
     }))
   }, [editTree, activeLeafId, imageCache])
 
-  const addTreeNode = useCallback((editId: string, parentEditId: string | null, prompt: string, intent: string) => {
+  const addTreeNode = useCallback((editId: string, parentEditId: string | null, prompt: string, intent: string, eventId?: string) => {
     setEditTree(prev => {
       const updated = prev.map(n =>
         n.edit_id === parentEditId && !n.children_ids.includes(editId)
@@ -121,6 +123,7 @@ export function useSession(): SessionHook {
           intent,
           created_at: new Date().toISOString(),
           children_ids: [],
+          event_id: eventId,
         })
       }
       return updated
@@ -214,7 +217,7 @@ export function useSession(): SessionHook {
             setImageCache(prev => ({ ...prev, [res.edit_id!]: res.result_image_b64! }))
           }
           if (res.operation !== 'undo' && res.operation !== 'reset') {
-            addTreeNode(res.edit_id, res.parent_edit_id ?? null, text, res.intent)
+            addTreeNode(res.edit_id, res.parent_edit_id ?? null, text, res.intent, res.event_id ?? undefined)
             // New edit = new leaf, switch branch to it
             setActiveLeafId(res.edit_id)
           }
