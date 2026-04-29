@@ -50,7 +50,7 @@ Return ONLY valid JSON:
 {"recommendations": [{"text": "...", "category": "technical"}, {"text": "...", "category": "color_mood"}, {"text": "...", "category": "creative"}]}
 """
 
-_TIMEOUT_SECONDS = 20
+_TIMEOUT_SECONDS = 40
 _REC_MODEL = "gemini-3.1-flash-lite-preview"
 _MAX_SIDE = 512  # resize image before sending — recommendations don't need high-res
 
