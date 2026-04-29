@@ -11,3 +11,4 @@ httpx==0.27.2
 pg8000==1.31.2
 cloudinary==1.41.0
 scipy
+chromadb>=1.0.0

@@ -1,5 +1,6 @@
 """Edit endpoint — routes user requests through the multi-agent pipeline."""
 import hashlib
+import threading
 import logging
 import traceback
 import uuid
@@ -26,6 +27,36 @@ router = APIRouter(prefix="/api/edit", tags=["edit"])
 MAX_HISTORY = 50
 
 _orchestrator = OrchestratorAgent()
+
+
+def _run_memory_index(session_id: str, event_id: str, user_text: str,
+                      vlm_context: dict, plan: dict) -> None:
+    try:
+        from agents.memory_agent import MemoryAgent
+        MemoryAgent().index_success(
+            event_id=event_id,
+            session_id=session_id,
+            user_text=user_text,
+            vlm_context=vlm_context,
+            plan=plan,
+            satisfaction_score=0.5,  # neutral default; updated when feedback arrives
+        )
+        logger.info("Auto-indexed edit event=%s", event_id)
+    except Exception as exc:
+        logger.warning("Auto memory index failed event=%s: %s", event_id, exc)
+
+
+def _schedule_memory_index(session_id: str, event_id: str, user_text: str,
+                            vlm_context: dict, plan: dict) -> None:
+    try:
+        t = threading.Thread(
+            target=_run_memory_index,
+            args=(session_id, event_id, user_text, vlm_context, plan),
+            daemon=True,
+        )
+        t.start()
+    except Exception as exc:
+        logger.warning("Could not schedule memory index: %s", exc)
 
 
 def _image_hash(b64: str) -> str:
@@ -63,11 +94,16 @@ async def _edit_image(session_id: str, req: EditRequest):
         session.trajectory,
         TrajectoryEvent(
             type="chat_input",
-            payload=TrajectoryEventPayload(user_text=user_text),
+            payload=TrajectoryEventPayload(
+                user_text=user_text,
+                selected_recommendation_index=req.selected_recommendation_index,
+            ),
         ),
     )
 
     result_b64: str | None = None
+    edit_id: str | None = None
+    parent_edit_id: str | None = None
     intent: str = "agent"
     engine: str | None = "agent"
     operation: str | None = None
@@ -80,42 +116,40 @@ async def _edit_image(session_id: str, req: EditRequest):
     validator_attempts: int | None = None
     quality_verdict: dict | None = None
     step_logs: list | None = None
+    source_image_context: dict | None = None
+    is_correction: bool | None = None
+    timing_ms: dict | None = None
 
-    # --- Session actions (undo / reset) ---
-    lower = user_text.lower()
-    if any(kw in lower for kw in ("undo", "되돌려", "취소", "이전으로", "실행 취소")):
+    # --- All requests go through the agent pipeline ---
+    # Undo/reset are handled as tools by the Planner, not keyword matching.
+    agent_result = _orchestrator.process_edit(
+        prompt=user_text,
+        image_b64=source_image,
+        session_id=session_id,
+        base_edit_id=req.base_edit_id or session.current_edit_id,
+    )
+
+    latency_ms = agent_result.get("latency_ms", 0) or 0
+    executed_plan = agent_result.get("executed_plan") or {}
+    errors = agent_result.get("errors", [])
+
+    # Check if the plan used undo/reset tools (intercepted by orchestrator)
+    session_action = agent_result.get("session_action")
+    if session_action == "undo":
         intent = "session_action"
         operation = "undo"
-        if len(session.edit_history) > 1:
-            session.edit_history.pop()
-            session.current_image_b64 = session.edit_history[-1]
-            response_text = "이전 상태로 되돌렸습니다."
-        else:
-            response_text = "되돌릴 편집 이력이 없습니다."
-        result_b64 = session.current_image_b64
-        _orchestrator.reset_session(session_id)
-
-    elif any(kw in lower for kw in ("reset", "초기화", "원본으로", "처음으로")):
+        result_b64 = agent_result.get("result_image_b64") or session.current_image_b64
+        response_text = agent_result.get("explanation", "이전 상태로 되돌렸습니다.")
+        edit_id = agent_result.get("edit_id")
+        parent_edit_id = agent_result.get("parent_edit_id")
+    elif session_action == "reset":
         intent = "session_action"
         operation = "reset"
-        session.current_image_b64 = session.edit_history[0]
-        session.edit_history = [session.edit_history[0]]
-        response_text = "원본 이미지로 초기화했습니다."
-        result_b64 = session.current_image_b64
-        _orchestrator.reset_session(session_id)
-
-    # --- Agent pipeline ---
+        result_b64 = agent_result.get("result_image_b64") or session.current_image_b64
+        response_text = agent_result.get("explanation", "원본 이미지로 초기화했습니다.")
+        edit_id = agent_result.get("edit_id")
+        parent_edit_id = agent_result.get("parent_edit_id")
     else:
-        agent_result = _orchestrator.process_edit(
-            prompt=user_text,
-            image_b64=source_image,
-            session_id=session_id,
-        )
-
-        latency_ms = agent_result.get("latency_ms", 0) or 0
-        executed_plan = agent_result.get("executed_plan") or {}
-        errors = agent_result.get("errors", [])
-
         intent = executed_plan.get("intent", "agent")
         response_text = agent_result.get("explanation", "")
         plan = executed_plan
@@ -123,6 +157,11 @@ async def _edit_image(session_id: str, req: EditRequest):
         validator_attempts = agent_result.get("validator_attempts")
         quality_verdict = agent_result.get("quality_verdict")
         step_logs = agent_result.get("step_logs")
+        edit_id = agent_result.get("edit_id")
+        parent_edit_id = agent_result.get("parent_edit_id")
+        source_image_context = agent_result.get("source_image_context")
+        is_correction = agent_result.get("is_correction")
+        timing_ms = agent_result.get("timing_ms")
 
         steps = executed_plan.get("steps", [])
         if steps:
@@ -144,6 +183,8 @@ async def _edit_image(session_id: str, req: EditRequest):
         session.edit_history.append(result_b64)
         if len(session.edit_history) > MAX_HISTORY:
             session.edit_history = session.edit_history[-MAX_HISTORY:]
+    if edit_id:
+        session.current_edit_id = edit_id
 
     result_url: str | None = None
     if image_changed and result_b64:
@@ -154,32 +195,49 @@ async def _edit_image(session_id: str, req: EditRequest):
 
     session.chat_history.append(ChatMessage(role="assistant", content=response_text))
 
-    append_event(
-        session.trajectory,
-        TrajectoryEvent(
-            type="edit_applied",
-            payload=TrajectoryEventPayload(
-                user_text=user_text,
-                intent_classified=intent,
-                engine_used=engine,
-                params=params,
-                result_image_hash=_image_hash(result_b64) if result_b64 else None,
-                image_url=result_url,
-                latency_ms=latency_ms,
-                error=error_msg,
-                plan=plan,
-                validator_verdict=validator_verdict,
-                validator_attempts=validator_attempts,
-                quality_verdict=quality_verdict,
-                orchestrator_step_logs=step_logs,
-            ),
+    edit_event = TrajectoryEvent(
+        type="edit_applied",
+        payload=TrajectoryEventPayload(
+            user_text=user_text,
+            intent_classified=intent,
+            engine_used=engine,
+            params=params,
+            result_image_hash=_image_hash(result_b64) if result_b64 else None,
+            image_url=result_url,
+            latency_ms=latency_ms,
+            error=error_msg,
+            edit_id=edit_id,
+            parent_edit_id=parent_edit_id,
+            plan=plan,
+            validator_verdict=validator_verdict,
+            validator_attempts=validator_attempts,
+            quality_verdict=quality_verdict,
+            orchestrator_step_logs=step_logs,
+            source_image_context=source_image_context,
+            is_correction=is_correction,
+            timing_ms=timing_ms,
         ),
     )
+    edit_event_id = edit_event.event_id
+    append_event(session.trajectory, edit_event)
+
+    # Auto-index every successful edit in Memory Agent (non-blocking)
+    if image_changed and not error_msg and plan:
+        _schedule_memory_index(
+            session_id=session_id,
+            event_id=edit_event_id,
+            user_text=user_text,
+            vlm_context=source_image_context or {},
+            plan=plan,
+        )
 
     store.set_session(session_id, session)
 
     return EditResponse(
         session_id=session_id,
+        edit_id=edit_id,
+        parent_edit_id=parent_edit_id,
+        event_id=edit_event_id,
         result_image_b64=result_b64,
         chat_message=response_text,
         intent=intent,
@@ -187,4 +245,64 @@ async def _edit_image(session_id: str, req: EditRequest):
         operation=operation,
         params=params,
         latency_ms=latency_ms,
+        timing_ms=timing_ms,
     )
+
+
+# ---------------------------------------------------------------------------
+# Tree navigation endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/{session_id}/undo")
+async def undo_edit(session_id: str):
+    """Move the tree cursor to the parent node (undo)."""
+    session = store.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    result = _orchestrator.undo(session_id)
+    if not result:
+        return {"ok": False, "message": "되돌릴 편집 이력이 없습니다."}
+
+    session.current_image_b64 = result["image_b64"]
+    session.current_edit_id = result["edit_id"]
+    store.set_session(session_id, session)
+
+    return {
+        "ok": True,
+        "edit_id": result["edit_id"],
+        "image_b64": result["image_b64"],
+        "message": "이전 상태로 되돌렸습니다.",
+    }
+
+
+@router.post("/{session_id}/navigate")
+async def navigate_edit(session_id: str, body: dict):
+    """Move the tree cursor to any node."""
+    session = store.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    edit_id = body.get("edit_id")
+    if not edit_id:
+        raise HTTPException(status_code=400, detail="edit_id is required")
+
+    result = _orchestrator.navigate(session_id, edit_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Edit node not found")
+
+    session.current_image_b64 = result["image_b64"]
+    session.current_edit_id = result["edit_id"]
+    store.set_session(session_id, session)
+
+    return {
+        "ok": True,
+        "edit_id": result["edit_id"],
+        "image_b64": result["image_b64"],
+    }
+
+
+@router.get("/{session_id}/tree")
+async def get_edit_tree(session_id: str):
+    """Return the full edit tree for a session."""
+    return _orchestrator.get_tree(session_id)
