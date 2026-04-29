@@ -55,17 +55,6 @@ function getAncestorChain(nodes: api.TreeNode[], targetId: string | null): api.T
   return chain
 }
 
-/** Find the deepest leaf starting from a given node (follow first child). */
-function findDeepestLeaf(nodes: api.TreeNode[], startId: string): string {
-  const nodeMap = new Map(nodes.map(n => [n.edit_id, n]))
-  let current = startId
-  while (true) {
-    const node = nodeMap.get(current)
-    if (!node || node.children_ids.length === 0) break
-    current = node.children_ids[0] // follow the first child
-  }
-  return current
-}
 
 export function useSession(): SessionHook {
   const [sessionId, setSessionId] = useState<string | null>(null)
@@ -302,7 +291,7 @@ export function useSession(): SessionHook {
     imageUrl: string,
     text: string,
     userNickname: string,
-    priorSteps?: { text: string; imageUrl: string | null }[],
+    _priorSteps?: { text: string; imageUrl: string | null }[],
     resumeIdx?: number,
   ) => {
     setIsLoading(true)

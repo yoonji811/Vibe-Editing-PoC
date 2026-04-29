@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { HistoryEntry } from '../hooks/useSession'
 import type { SessionSummary, TreeNode } from '../api/client'
-import { getTrajectory, getEditTree } from '../api/client'
+import { getTrajectory } from '../api/client'
 
 /** Truncate text to first N words. */
 function truncateLabel(text: string, maxWords = 5): string {
@@ -27,9 +27,6 @@ export interface EditStep {
   imageUrl: string | null
 }
 
-interface SessionDetail {
-  steps: EditStep[]
-}
 
 /** Tree node reconstructed from trajectory events. */
 interface PastTreeNode {
