@@ -34,7 +34,17 @@
       "Bash(\"/c/Users/yj811/AppData/Roaming/npm/vercel\" --version)",
       "Bash(\"/c/Users/yj811/AppData/Roaming/npm/railway.cmd\" --version)",
       "Bash(\"/c/Users/yj811/AppData/Roaming/npm/vercel.cmd\" --version)",
-      "Bash(/c/Users/yj811/AppData/Roaming/npm/railway.cmd variables:*)"
+      "Bash(/c/Users/yj811/AppData/Roaming/npm/railway.cmd variables:*)",
+      "Bash(npx vercel:*)",
+      "Bash(railway status:*)",
+      "Bash(railway whoami:*)",
+      "Bash(node:*)",
+      "Bash(npx tsc:*)",
+      "Bash(pip install:*)",
+      "Bash(node \"C:\\\\Users\\\\yj811\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\\\\@railway\\\\cli\\\\bin\\\\railway.js\" environment list)",
+      "Bash(node \"C:\\\\Users\\\\yj811\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\\\\@railway\\\\cli\\\\bin\\\\railway.js\" environment)",
+      "Bash(vercel --prod --yes)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); events=d.get\\('events',[]\\); [print\\(f\\\\\"{ev['type']}: image_url={ev.get\\('payload',{}\\).get\\('image_url','N/A'\\)}\\\\\"\\) for ev in events]\")"
     ]
   }
 }
