@@ -1,9 +1,11 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useSession } from './hooks/useSession'
 import ImageViewer from './components/ImageViewer'
 import ChatPanel from './components/ChatPanel'
 import HistoryBar, { type EditStep } from './components/HistoryBar'
 import * as api from './api/client'
+
+type FeedbackState = 'none' | 'up' | 'down'
 
 interface PastView {
   sessionId: string
@@ -13,7 +15,6 @@ interface PastView {
 
 export default function App() {
   const session = useSession()
-  const [historyIndex, setHistoryIndex] = useState(0)
   const [nicknameInput, setNicknameInput] = useState('')
   const [nickname, setNickname] = useState<string | null>(null)
   const [isEditingNickname, setIsEditingNickname] = useState(false)
@@ -23,15 +24,27 @@ export default function App() {
   const [isHoldingOriginal, setIsHoldingOriginal] = useState(false)
   const [pastView, setPastView] = useState<PastView | null>(null)
   const [preInput, setPreInput] = useState('')
+  const [feedbackMap, setFeedbackMap] = useState<Record<string, FeedbackState>>({})
+
+  // Derive historyIndex from currentEditId
+  const historyIndex = useMemo(() => {
+    if (!session.currentEditId) return session.history.length - 1
+    const idx = session.history.findIndex(e => e.editId === session.currentEditId)
+    return idx >= 0 ? idx : session.history.length - 1
+  }, [session.currentEditId, session.history])
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const mainRef = useRef<HTMLElement>(null)
-  const historyLengthRef = useRef(0)
+  const historyRef = useRef(session.history)
+  const currentEditIdRef = useRef(session.currentEditId)
+  const setCursorToRef = useRef(session.setCursorTo)
   const prevHistoryLenRef = useRef(0)
   const pastViewRef = useRef<PastView | null>(null)
 
-  // Keep refs in sync
-  useEffect(() => { historyLengthRef.current = session.history.length }, [session.history.length])
+  // Keep refs in sync for wheel handler
+  useEffect(() => { historyRef.current = session.history }, [session.history])
+  useEffect(() => { currentEditIdRef.current = session.currentEditId }, [session.currentEditId])
+  useEffect(() => { setCursorToRef.current = session.setCursorTo }, [session.setCursorTo])
   useEffect(() => { pastViewRef.current = pastView }, [pastView])
 
   // Fetch sessions by nickname
@@ -58,18 +71,16 @@ export default function App() {
         const t = setTimeout(() => setShowScrollHint(false), 2500)
         prevHistoryLenRef.current = len
         setPastView(null)
-        setHistoryIndex(len - 1)
         return () => clearTimeout(t)
       }
       prevHistoryLenRef.current = len
     }
   }, [session.history.length])
 
-  // Wheel event: navigate history or past view.
-  // Attached to window (not mainRef) because mainRef doesn't exist at mount time
-  // (user starts on the login screen). At event time mainRef is already set,
-  // so we use it to scope the handler to the image area only.
+  // Wheel + touch events: navigate history or past view.
+  // Attached to window once; scoped to image area (mainRef) at event time.
   useEffect(() => {
+    // ── Wheel ──────────────────────────────────────────────────────────────
     const handleWheel = (e: WheelEvent) => {
       const mainEl = mainRef.current
       if (!mainEl || !mainEl.contains(e.target as Node)) return
@@ -85,18 +96,90 @@ export default function App() {
             : Math.min(prev.steps.length - 1, prev.idx + 1)
           return newIdx === prev.idx ? prev : { ...prev, idx: newIdx }
         })
-      } else if (historyLengthRef.current > 1) {
-        e.preventDefault()
-        setHistoryIndex(prev => {
-          if (e.deltaY < 0) return Math.max(0, prev - 1)
-          return Math.min(historyLengthRef.current - 1, prev + 1)
-        })
+      } else {
+        const hist = historyRef.current
+        if (hist.length > 1) {
+          e.preventDefault()
+          const curId = currentEditIdRef.current
+          const curIdx = curId ? hist.findIndex(h => h.editId === curId) : hist.length - 1
+          const idx = curIdx >= 0 ? curIdx : hist.length - 1
+          const newIdx = e.deltaY < 0 ? Math.max(0, idx - 1) : Math.min(hist.length - 1, idx + 1)
+          if (newIdx !== idx && hist[newIdx]?.editId) {
+            setCursorToRef.current(hist[newIdx].editId!)
+          }
+        }
       }
     }
 
+    // ── Touch (tablet/mobile) ───────────────────────────────────────────────
+    // Swipe up/down on the image area = navigate history (same as scroll wheel).
+    // Press without significant movement = compare original (same as mouse hold).
+    let touchStartY = 0
+    let isSwiping = false
+
+    const handleTouchStart = (e: TouchEvent) => {
+      const mainEl = mainRef.current
+      if (!mainEl || !mainEl.contains(e.target as Node)) return
+      touchStartY = e.touches[0].clientY
+      isSwiping = false
+      setIsHoldingOriginal(true) // show original immediately; cancelled if swipe
+    }
+
+    const handleTouchMove = (e: TouchEvent) => {
+      const mainEl = mainRef.current
+      if (!mainEl || !mainEl.contains(e.target as Node)) return
+      if (!isSwiping && Math.abs(touchStartY - e.touches[0].clientY) > 30) {
+        isSwiping = true
+        setIsHoldingOriginal(false) // cancel comparison once swipe detected
+        e.preventDefault()          // stop browser scroll
+      }
+    }
+
+    const handleTouchEnd = (e: TouchEvent) => {
+      const mainEl = mainRef.current
+      if (!mainEl || !mainEl.contains(e.target as Node)) return
+      setIsHoldingOriginal(false)
+
+      if (isSwiping) {
+        const deltaY = touchStartY - e.changedTouches[0].clientY
+        const pv = pastViewRef.current
+        if (pv) {
+          if (pv.steps.length > 1) {
+            setPastView(prev => {
+              if (!prev) return prev
+              const newIdx = deltaY > 0
+                ? Math.min(prev.steps.length - 1, prev.idx + 1)
+                : Math.max(0, prev.idx - 1)
+              return newIdx === prev.idx ? prev : { ...prev, idx: newIdx }
+            })
+          }
+        } else {
+          const hist = historyRef.current
+          if (hist.length > 1) {
+            const curId = currentEditIdRef.current
+            const curIdx = curId ? hist.findIndex(h => h.editId === curId) : hist.length - 1
+            const idx = curIdx >= 0 ? curIdx : hist.length - 1
+            const newIdx = deltaY > 0 ? Math.min(hist.length - 1, idx + 1) : Math.max(0, idx - 1)
+            if (newIdx !== idx && hist[newIdx]?.editId) {
+              setCursorToRef.current(hist[newIdx].editId!)
+            }
+          }
+        }
+      }
+      isSwiping = false
+    }
+
     window.addEventListener('wheel', handleWheel, { passive: false })
-    return () => window.removeEventListener('wheel', handleWheel)
-  }, []) // attach once to window; state and refs accessed at event time
+    window.addEventListener('touchstart', handleTouchStart, { passive: true })
+    window.addEventListener('touchmove', handleTouchMove, { passive: false })
+    window.addEventListener('touchend', handleTouchEnd, { passive: true })
+    return () => {
+      window.removeEventListener('wheel', handleWheel)
+      window.removeEventListener('touchstart', handleTouchStart)
+      window.removeEventListener('touchmove', handleTouchMove)
+      window.removeEventListener('touchend', handleTouchEnd)
+    }
+  }, []) // attach once; refs and stable setters accessed at event time
 
   // Compute image source (data URI or Cloudinary URL)
   const displayImageSrc = (() => {
@@ -116,23 +199,38 @@ export default function App() {
     }
     if (session.sessionId) {
       if (historyIndex < session.history.length) {
-        return entryToSrc(session.history[historyIndex])
+        const src = entryToSrc(session.history[historyIndex])
+        if (src) return src
       }
       return toB64Src(session.currentImageB64)
     }
     return null
   })()
 
-  const handleHistorySelect = (index: number) => {
+  const handleFeedback = async (action: api.FeedbackAction) => {
+    if (!session.sessionId) return
+    const entry = session.history[historyIndex]
+    if (!entry?.eventId) return
+    const key = entry.eventId
+    if (feedbackMap[key] && feedbackMap[key] !== 'none') return // already given
+    setFeedbackMap(prev => ({ ...prev, [key]: action === 'thumbs_up' ? 'up' : 'down' }))
+    try {
+      await api.sendFeedback(session.sessionId, key, action)
+    } catch {
+      setFeedbackMap(prev => ({ ...prev, [key]: 'none' }))
+    }
+  }
+
+  const handleHistorySelect = (editId: string) => {
     setPastView(null)
-    setHistoryIndex(index)
+    session.moveCursorTo(editId)
   }
 
   const handlePastStepSelect = (sessionId: string, steps: EditStep[], idx: number) => {
     setPastView({ sessionId, steps, idx })
   }
 
-  const handleSend = async (text: string) => {
+  const handleSend = async (text: string, selectedRecommendationIndex?: number) => {
     if (pastView) {
       // Resume from the selected past step image, then apply the edit
       const imageUrl = pastView.steps[pastView.idx]?.imageUrl
@@ -153,7 +251,7 @@ export default function App() {
       ? session.history[historyIndex]?.imageB64
       : undefined
 
-    await session.sendMessage(text, inputB64)
+    await session.sendMessage(text, inputB64, selectedRecommendationIndex)
     // historyIndex updated by the useEffect watching session.history.length
   }
 
@@ -163,19 +261,17 @@ export default function App() {
     if (trimmed) setNickname(trimmed)
   }
 
-  // Title click → reset session, keep nickname
+  // Title click → reset session and go back to login
   const handleTitleClick = async () => {
-    if (!session.sessionId && !pastView) return
-    // Force-save trajectory before clearing state so the session appears in the list
+    if (session.isLoading) return
     if (session.sessionId) {
       try { await api.endSession(session.sessionId) } catch { /* non-fatal */ }
     }
     session.resetSession()
     setPastView(null)
     setPreInput('')
-    setHistoryIndex(0)
     setIsHoldingOriginal(false)
-    if (nickname) await fetchSessions(nickname)
+    setNickname(null)
   }
 
   // Nickname inline edit
@@ -191,7 +287,6 @@ export default function App() {
       setPastView(null)
       setNickname(trimmed)
       setPreInput('')
-      setHistoryIndex(0)
       setSessions([])
     }
     setIsEditingNickname(false)
@@ -205,7 +300,6 @@ export default function App() {
     session.resetSession()
     setPastView(null)
     setPreInput('')
-    setHistoryIndex(0)
     setIsHoldingOriginal(false)
     if (nickname) await fetchSessions(nickname)
   }
@@ -215,7 +309,6 @@ export default function App() {
     if (!file || !nickname) return
     e.target.value = ''
     await session.uploadImage(file, nickname)
-    setHistoryIndex(0)
   }
 
   const handlePreSubmit = async () => {
@@ -230,13 +323,11 @@ export default function App() {
         await session.resumeAndSend(origId, imageUrl, preInput.trim(), nickname, steps, idx)
         await fetchSessions(nickname)
         setPreInput('')
-        setHistoryIndex(0)
         return
       }
     }
     await session.generateFromText(preInput.trim(), nickname)
     setPreInput('')
-    setHistoryIndex(0)
   }
 
   const handlePreKey = (e: React.KeyboardEvent) => {
@@ -339,12 +430,14 @@ export default function App() {
           <HistoryBar
             sessions={sessions}
             history={session.history}
-            currentIndex={historyIndex}
+            currentEditId={session.currentEditId}
+            editTree={session.editTree}
             currentSessionId={session.sessionId}
             activePastSessionId={pastView?.sessionId}
             activePastStepIdx={pastView?.idx}
             isLoading={session.isLoading}
             onSelect={handleHistorySelect}
+            onNavigateNode={session.navigateToNode}
             onPastStepSelect={handlePastStepSelect}
             onNewImage={handleNewImage}
           />
@@ -355,18 +448,46 @@ export default function App() {
           {/* Image area */}
           <main
             ref={mainRef}
-            className="flex items-center justify-center p-4 overflow-hidden shrink-0"
-            style={{ height: '78vh' }}
+            className="flex flex-col items-center justify-center p-4 overflow-hidden flex-1 min-h-0"
           >
             {showImage ? (
-              <ImageViewer
-                imageSrc={displayImageSrc!}
-                isLoading={session.isLoading}
-                showScrollHint={showScrollHint && !isHoldingOriginal && !pastView}
-                onMouseDown={() => setIsHoldingOriginal(true)}
-                onMouseUp={() => setIsHoldingOriginal(false)}
-                onMouseLeave={() => setIsHoldingOriginal(false)}
-              />
+              <>
+                <ImageViewer
+                  imageSrc={displayImageSrc!}
+                  isLoading={session.isLoading}
+                  showScrollHint={showScrollHint && !isHoldingOriginal && !pastView}
+                  onMouseDown={() => setIsHoldingOriginal(true)}
+                  onMouseUp={() => setIsHoldingOriginal(false)}
+                  onMouseLeave={() => setIsHoldingOriginal(false)}
+                />
+                {/* Feedback buttons — show when viewing an edit (index > 0, has eventId) */}
+                {!pastView && !session.isLoading && historyIndex > 0 && session.history[historyIndex]?.eventId && (() => {
+                  const eventId = session.history[historyIndex].eventId!
+                  const fb = feedbackMap[eventId] ?? 'none'
+                  return (
+                    <div className="flex items-center gap-2 mt-2">
+                      <button
+                        onClick={() => handleFeedback('thumbs_up')}
+                        disabled={fb !== 'none'}
+                        title="만족"
+                        className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors text-base
+                          ${fb === 'up' ? 'bg-green-100 text-green-600' : 'bg-gray-100 hover:bg-green-50 text-gray-400 hover:text-green-500 disabled:opacity-40'}`}
+                      >
+                        👍
+                      </button>
+                      <button
+                        onClick={() => handleFeedback('thumbs_down')}
+                        disabled={fb !== 'none'}
+                        title="불만족"
+                        className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors text-base
+                          ${fb === 'down' ? 'bg-red-100 text-red-500' : 'bg-gray-100 hover:bg-red-50 text-gray-400 hover:text-red-400 disabled:opacity-40'}`}
+                      >
+                        👎
+                      </button>
+                    </div>
+                  )
+                })()}
+              </>
             ) : session.isLoading ? (
               <div className="flex flex-col items-center gap-4">
                 <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
@@ -401,6 +522,8 @@ export default function App() {
               onSend={handleSend}
               onSave={session.saveImage}
               error={session.error}
+              recommendations={session.recommendations}
+              isLoadingRecommendations={session.isLoadingRecommendations}
             />
           ) : (
             <div className="bg-white border-t border-gray-200 px-6 py-4 shrink-0">
@@ -408,16 +531,18 @@ export default function App() {
               <div className={`flex items-center gap-3 bg-gray-50 border rounded-full px-4 py-2.5 transition-colors ${
                 session.isLoading ? 'border-gray-200 opacity-70' : 'border-gray-200 hover:border-gray-300 focus-within:border-blue-300'
               }`}>
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={session.isLoading}
-                  className="text-gray-400 hover:text-gray-600 shrink-0 disabled:opacity-40"
-                  title="이미지 업로드"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                  </svg>
-                </button>
+                {!pastView && (
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={session.isLoading}
+                    className="text-gray-400 hover:text-gray-600 shrink-0 disabled:opacity-40"
+                    title="이미지 업로드"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                    </svg>
+                  </button>
+                )}
                 <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
                 <input
                   value={preInput}

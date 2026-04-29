@@ -71,7 +71,7 @@ def classify_intent(user_text: str, chat_history: List[ChatMessage]) -> dict:
     prompt = f"{_SYSTEM_PROMPT}{history_ctx}\n\nUser: {user_text}\n\nJSON:"
 
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model = genai.GenerativeModel("gemini-3-flash-preview")
         response = model.generate_content(prompt)
         text = response.text.strip()
         # Strip markdown code fences if present

@@ -136,3 +136,30 @@ def load_trajectory(session_id: str) -> Optional[Trajectory]:
 def append_event(trajectory: Trajectory, event: TrajectoryEvent) -> None:
     trajectory.events.append(event)
     save_trajectory(trajectory)
+
+
+def get_edit_events(session_id: str) -> list:
+    """Return all edit_applied events for a session (for Hydration & Memory Agent)."""
+    trajectory = load_trajectory(session_id)
+    if trajectory is None:
+        return []
+    return [e for e in trajectory.events if e.type == "edit_applied"]
+
+
+def update_event_feedback(
+    session_id: str,
+    event_id: str,
+    satisfaction_score: float,
+    feedback_type: str,
+) -> bool:
+    """Update satisfaction_score and feedback_type on a specific event. Returns True on success."""
+    trajectory = load_trajectory(session_id)
+    if trajectory is None:
+        return False
+    for event in trajectory.events:
+        if event.event_id == event_id:
+            event.payload.satisfaction_score = satisfaction_score
+            event.payload.feedback_type = feedback_type
+            save_trajectory(trajectory)
+            return True
+    return False
